@@ -629,4 +629,47 @@ mod tests {
         raw.push(0);
         assert!(BchTransaction::parse(&raw).is_err());
     }
+
+    #[test]
+    fn verifies_the_deterministic_interoperability_fixture() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            network: String,
+            amount: u64,
+            pay_to: String,
+            source_value: u64,
+            source_script_pubkey: String,
+            raw_transaction: String,
+            txid: String,
+            payer: String,
+            serialized_size: usize,
+            fee: u64,
+        }
+
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../test/fixtures/bch-exact-p2pkh.json")).unwrap();
+        let network = fixture.network.parse::<BchChainReference>().unwrap();
+        let transaction =
+            BchTransaction::parse(&hex::decode(fixture.raw_transaction).unwrap()).unwrap();
+        let pay_to = CashAddr::decode(&fixture.pay_to, network).unwrap();
+        let source_output = SourceOutput {
+            value: fixture.source_value,
+            script_pubkey: hex::decode(fixture.source_script_pubkey).unwrap(),
+        };
+        let verified = verify_payment(
+            &transaction,
+            &[source_output],
+            network,
+            &pay_to.locking_script(),
+            fixture.amount,
+            BchPolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(verified.txid.to_string(), fixture.txid);
+        assert_eq!(verified.payer.to_string(), fixture.payer);
+        assert_eq!(verified.fee, fixture.fee);
+        assert_eq!(transaction.serialize().len(), fixture.serialized_size);
+    }
 }

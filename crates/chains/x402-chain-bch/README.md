@@ -27,6 +27,12 @@ The adapter accounts for Fulcrum's two amount encodings: verbose transaction
 outputs are BCH decimal values, while blockchain.scripthash.listunspent returns
 integer satoshis.
 
+The crate test suite includes `test/fixtures/bch-exact-p2pkh.json`, a
+deterministic native-BCH P2PKH payment fixture shared with the TypeScript
+`@x402/bch` implementation. It covers the serialized transaction, source
+output, merchant amount, payer, transaction ID, and fee so integrations can
+compare results across both SDKs.
+
 ```rust,ignore
 use x402_chain_bch::{BchChainReference, FulcrumProvider, FulcrumTcpTransport, V2BchExact};
 use x402_types::scheme::X402SchemeFacilitatorBuilder;
