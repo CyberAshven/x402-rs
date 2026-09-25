@@ -34,11 +34,24 @@ specifications. The implementation should accept exactly one spelling.
 
 ## 2. Settlement timing
 
-Recommended default: BCH exact uses settle-before-resource execution.
+Recommended default: advertise the canonical x402 v2 payment flow as
+`extra.paymentFlow: "upfront"` for native BCH exact. In `x402-rs`, this maps
+to the paygate's `settle_before_execution = true` configuration.
+
+The resulting ordering is:
+
+```text
+settle (re-validate and broadcast) -> resource -> response
+```
+
+The facilitator's `/verify` endpoint remains useful as a read-only diagnostic,
+but it must not be treated as the authorization gate for the resource. The
+upfront flow establishes payment by settlement itself.
 
 Rationale: `/verify` cannot reserve a UTXO. A payer can double-spend an input
 between verification and settlement. Broadcasting before resource execution
-provides a stronger guarantee than a verify-only authorization flow.
+provides a stronger guarantee than a verify-only authorization flow and uses
+the flow vocabulary defined by canonical x402.
 
 ## 3. Confirmation threshold
 

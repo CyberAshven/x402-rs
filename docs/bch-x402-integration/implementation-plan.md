@@ -22,6 +22,8 @@ facilitator. It must define:
 - Payer derivation and settlement-response semantics.
 - Mempool versus confirmation requirements.
 - Replay and idempotency behavior.
+- `extra.assetTransferMethod = "native"` and
+  `extra.paymentFlow = "upfront"` semantics.
 
 No aliases should be accepted unless the specification explicitly defines them.
 The initial contract should describe finalized raw transactions only. PSBT is
@@ -123,11 +125,14 @@ Verification must be read-only and must prove:
 Settlement must re-verify, broadcast the same raw transaction, handle already
 known identical transactions idempotently, detect conflicts, and return the
 TXID with `bch:*` network identity. If broadcast succeeded but status cannot be
-established, return a pending settlement result with the TXID.
+established, return a `settlement_pending` result with the TXID so the resource
+server can reconcile instead of blindly rebroadcasting. The x402-rs paygate
+must run this settlement path before resource execution for the advertised
+`upfront` flow; `/verify` alone must not authorize the request.
 
-The first server integration should use settle-before-resource execution. A
-plain BCH transaction cannot be reserved by `/verify`, and verification alone
-does not prevent a conflicting spend.
+The first server integration should use the canonical `upfront` flow. A plain
+BCH transaction cannot be reserved by `/verify`, and verification alone does
+not prevent a conflicting spend.
 
 ## Phase 5 — x402-rs integration and documentation
 
@@ -140,6 +145,8 @@ Add:
 - A BCH exact scheme specification.
 - Error mapping for invalid transactions, spent inputs, conflicts, and pending
   settlement.
+- Mapping from the canonical `upfront` payment flow to the x402-rs paygate
+  configuration.
 
 ## Phase 6 — CashTokens
 

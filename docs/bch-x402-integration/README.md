@@ -33,6 +33,20 @@ The first implementation target is x402 v2 `exact` for native BCH:
 This preserves the canonical x402 transport and facilitator flow while adapting
 the authorization object to BCH's transaction-based authorization model.
 
+## Official-library comparison
+
+The official x402 library defines generic payment and facilitator types, then
+places each chain's client, server, and facilitator implementation in a
+chain-specific mechanism package. Its Aptos exact mechanism is the closest
+reference for BCH because it carries a complete client-signed transaction in
+the payment payload and validates it again before settlement.
+
+For native BCH, the canonical v2 flow is `upfront`: the facilitator revalidates
+and broadcasts the transaction before the resource runs. `x402-rs` expresses
+that same ordering through `settle_before_execution = true` in the paygate.
+The BCH crate should follow Rust-local traits and `PriceTag` patterns rather
+than copying the official TypeScript API surface.
+
 ## Future interoperability scope
 
 The POC deliberately starts with native BCH, P2PKH, CashAddr, and finalized

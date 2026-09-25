@@ -81,7 +81,8 @@ implementation-time decision recorded here:
 
 - Represent the native asset as `BCH`, with
   `extra.assetTransferMethod = "native"`.
-- Use settle-before-resource execution for the first BCH deployment.
+- Use the canonical x402 v2 `upfront` payment flow for the first BCH
+  deployment, mapped to `x402-rs` paygate settlement-before-execution.
 - Support standard P2PKH inputs and CashAddr recipients first.
 - Fetch source outputs from the facilitator's chain provider, rather than
   trusting source-output data supplied by the client.
@@ -104,3 +105,37 @@ normalized to validated locking scripts plus token metadata. PSBT will be a
 wallet/signing interchange format whose output must be finalized into the raw
 transaction verified and broadcast by x402; it will not be treated as a
 settlement authorization merely because it parses.
+
+## Iteration 8 — comparison with the official x402 library and x402-rs
+
+The local `/mnt/hdd/projects/x402` checkout was an empty repository, but its
+configured official remote was fetched at `x402-foundation/x402` main commit
+`4fcf836cc393174130e1358577ce5d37356da1c3`. The official repository's current
+architecture is a useful compatibility reference, while `/mnt/hdd/projects/x402-rs`
+remains the implementation target.
+
+The comparison established four points:
+
+1. The official core keeps `PaymentRequirements`, `PaymentPayload`, facilitator
+   responses, and transport handling generic. A chain package supplies the
+   client, server, and facilitator scheme implementations; it should not
+   modify core protocol types for BCH.
+2. Official Aptos exact is the closest precedent for BCH's payload shape: the
+   client submits a complete signed transaction, and the facilitator decodes,
+   verifies, re-validates during settlement, and submits that same transaction.
+   Its fee sponsorship is chain-native and must not be copied into BCH without
+   a BCH-specific signing protocol.
+3. Official x402 v2 names pre-resource settlement `upfront`. For BCH, the
+   native exact mechanism should advertise `extra.paymentFlow = "upfront"`.
+   In x402-rs this is implemented through the existing paygate setting
+   `settle_before_execution = true`.
+4. x402-rs uses Rust-native traits, typed protocol aliases, `PriceTag` helpers,
+   and chain-specific provider traits rather than mirroring TypeScript APIs.
+   BCH should follow those local patterns while preserving the official wire
+   shapes and flow semantics.
+
+The official SVM implementation also reinforces two BCH requirements: bounded
+transaction policy checks and explicit handling of broadcast-but-unconfirmed
+settlement. BCH should use the transaction ID as its reconciliation value and
+return `settlement_pending` when broadcast succeeded but confirmation status is
+indeterminate.
