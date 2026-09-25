@@ -494,6 +494,25 @@ fn parse_satoshi_amount(value: &Value) -> Result<u64, BchProviderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestTransport {
+        fail: bool,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl FulcrumTransport for TestTransport {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value, BchProviderError> {
+            self.calls.lock().unwrap().push(method.to_string());
+            if self.fail {
+                Err(BchProviderError::Transport("offline".to_string()))
+            } else {
+                Ok(json!({"height": 123}))
+            }
+        }
+    }
 
     #[test]
     fn parses_exact_bch_decimal_amounts_without_floating_point() {
@@ -507,5 +526,39 @@ mod tests {
             100_000_000
         );
         assert!(parse_satoshi_amount(&json!("0.00000001")).is_err());
+    }
+
+    #[test]
+    fn fails_over_to_the_next_transport() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let first = TestTransport {
+            fail: true,
+            calls: calls.clone(),
+        };
+        let second = TestTransport {
+            fail: false,
+            calls: calls.clone(),
+        };
+        let transport = FailoverFulcrumTransport::new(vec![first, second]).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = runtime.block_on(transport.request("blockchain.headers.subscribe", json!([])));
+
+        assert_eq!(result.unwrap(), json!({"height": 123}));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "blockchain.headers.subscribe".to_string(),
+                "blockchain.headers.subscribe".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_failover_set() {
+        assert!(FailoverFulcrumTransport::<TestTransport>::new(vec![]).is_err());
     }
 }
