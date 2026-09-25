@@ -40,6 +40,69 @@ The first release can be reliable if it explicitly supports only:
 CashTokens, P2SH/CashScript, alternate address encodings, PSBT, sponsorship,
 `upto`, and batch settlement must be advertised as unsupported in this release.
 
+## Decisions still to lock
+
+These decisions affect interoperability or security and cannot be left to
+individual SDK implementations.
+
+### Wire representation
+
+- Whether `payTo` must contain a fully prefixed CashAddr
+  (`bitcoincash:...` / `bchtest:...`) or may omit the prefix. The recommended
+  choice is the fully prefixed form.
+- Whether `payload.transaction` is standard padded RFC 4648 base64 of the raw
+  transaction bytes, with no JSON wrapper or alternate hex form.
+- Canonical amount grammar: decimal ASCII digits, no sign or fractional value,
+  no non-canonical leading zeroes, and an explicit maximum.
+- Whether `payload.accepted` must deep-equal the facilitator requirements,
+  including `extra`, and how unknown extra keys are handled.
+- What `maxTimeoutSeconds` means for BCH. A normal BCH transaction has no
+  signed expiry, so this must be an HTTP/resource acceptance deadline or an
+  explicitly documented non-cryptographic hint; it must not be presented as a
+  transaction expiry that BCH cannot enforce.
+
+### Transaction policy
+
+- Exact P2PKH input and output script forms, including whether all non-payment
+  outputs must also be P2PKH.
+- Whether the transaction must have exactly one merchant output and must reject
+  additional outputs paying the same script.
+- Allowed `nLockTime`, input sequence values, script sizes, transaction size,
+  input count, and output count.
+- Minimum fee policy, maximum fee policy, and dust policy. These must be
+  explicit because BCH consensus validity and node relay policy are different
+  things.
+- The accepted BCH sighash byte and signature encoding. The POC recommendation
+  is `0x61` (`ALL | FORKID | UTXOS`) with strict DER and public-key checks.
+- How unconfirmed source inputs are treated and which provider states prove an
+  outpoint is spendable.
+
+### Settlement and replay
+
+- Whether `success: true` means node/mempool acceptance or one confirmation by
+  default. The recommendation is one confirmation for the conservative default
+  and an explicit mempool mode for low-latency deployments.
+- Exact `settlement_pending` response shape and retry/reconciliation rules.
+- Whether a repeated identical TXID is idempotent, rejected as already used, or
+  accepted only when the resource server supplies an application-level
+  idempotency key.
+- Protection against reusing one valid broadcast transaction to access several
+  paid resources before its inputs are confirmed. This is not solved by BCH's
+  UTXO double-spend rule alone; the resource server/facilitator boundary must
+  define one-time consumption or request binding.
+- Stable machine-readable error codes for malformed transactions, invalid
+  signatures, source-output failures, conflicts, unsupported tokens, and
+  pending settlement.
+
+### SDK and operational surface
+
+- Public package names, registration helpers, signer interfaces, provider
+  interfaces, supported feature flags, and versioning for TypeScript and Rust.
+- At least one supported BCHN/Fulcrum-compatible provider implementation or a
+  documented adapter contract with tested examples.
+- Node, Rust, and dependency support ranges; testnet setup; fee configuration;
+  logging and privacy expectations; and the compatibility matrix.
+
 ## Shared conformance gates before public release
 
 ### 1. Normative scheme document

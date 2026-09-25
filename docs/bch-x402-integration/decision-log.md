@@ -160,3 +160,29 @@ They must share the wire contract, transaction validity rules, error meanings,
 and golden vectors. If the official repository does not accept the BCH package,
 an independently published package can still register with the official core
 without modifying that core.
+
+## Iteration 10 — remaining decisions for reliable third-party use
+
+The readiness review identified the final lock points that could otherwise
+drift between the TypeScript and Rust implementations:
+
+- Fully prefixed CashAddr versus prefixless `payTo` values.
+- Exact base64 and amount canonicalization rules.
+- Deep equality and unknown-field handling for accepted requirements.
+- The non-cryptographic meaning of `maxTimeoutSeconds` for a raw BCH
+  transaction that has no signed expiry.
+- P2PKH script shape, change-output policy, duplicate merchant-output policy,
+  locktime/sequence limits, fee/dust limits, and transaction-size limits.
+- Source-UTXO mempool/confirmation states and the required BCH sighash/signature
+  encoding.
+- Whether default settlement success requires mempool acceptance or one
+  confirmation.
+- `settlement_pending`, repeated-TXID reconciliation, and one-time resource
+  consumption to prevent replaying one broadcast transaction across requests.
+- Stable error codes, provider/signer interfaces, package names, supported
+  runtime versions, and the minimum tested BCH backend.
+
+Decision: do not let either SDK choose these independently. Resolve them in the
+shared scheme specification and fixtures before publishing a third-party
+release. CashTokens, PSBT, custom addresses, sponsorship, and advanced schemes
+remain explicitly deferred rather than being hidden unresolved behavior.
