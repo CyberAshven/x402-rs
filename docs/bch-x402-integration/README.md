@@ -90,3 +90,8 @@ testing, and acceptance criteria.
 See `open-decisions.md`. Each item has a recommended default. Implementation
 should not silently change these wire-level decisions; if a default changes,
 add a new entry to `decision-log.md` first.
+
+## Readiness assessment
+
+See `readiness-assessment.md` for the distinction between a constrained POC and
+a reliable cross-SDK release, including the remaining conformance gates.

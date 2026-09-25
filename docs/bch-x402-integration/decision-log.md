@@ -139,3 +139,24 @@ transaction policy checks and explicit handling of broadcast-but-unconfirmed
 settlement. BCH should use the transaction ID as its reconciliation value and
 return `settlement_pending` when broadcast succeeded but confirmation status is
 indeterminate.
+
+## Iteration 9 — readiness for third-party use in both SDKs
+
+The available context is sufficient for a constrained native-BCH POC, but not
+yet sufficient to promise a reliable drop-in integration for third-party
+developers. The architecture is understood in both targets: the official x402
+library can host a chain-specific mechanism package, while `x402-rs` already
+has chain crates, v2 aliases, client signers, facilitator builders, price tags,
+and settlement-before-execution support.
+
+Decision: proceed with implementation only behind a shared conformance gate.
+Before public release, freeze one BCH exact scheme document, create shared
+TypeScript/Rust/libauth transaction fixtures, define read-only provider and
+signer contracts, make `upfront` enforcement fail closed, and specify the
+default mempool/confirmation and `settlement_pending` retry behavior.
+
+The official SDK and x402-rs implementations may use different internal APIs.
+They must share the wire contract, transaction validity rules, error meanings,
+and golden vectors. If the official repository does not accept the BCH package,
+an independently published package can still register with the official core
+without modifying that core.
