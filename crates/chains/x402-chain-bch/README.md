@@ -47,6 +47,17 @@ migration notes:
 | Mainnet | `bch.imaginary.cash`, `blackie.c3-soft.com`, `electroncash.dk` |
 | Chipnet | `chipnet.bch.ninja` |
 
+`FailoverFulcrumTransport` provides the minimum sequential failover behavior:
+pass it caller-created transports in the desired order. It retries all
+requests, including broadcasts; if a broadcast response is lost after the
+server accepts a transaction, applications must reconcile the result by
+checking transaction status rather than assuming the broadcast failed.
+
+```rust,ignore
+let transport = FailoverFulcrumTransport::new(vec![primary, secondary])?;
+let provider = FulcrumProvider::new(transport, BchChainReference::MAINNET);
+```
+
 The bundled `FulcrumTcpTransport` is intentionally a plain TCP building block;
 applications requiring TLS or WSS should provide a transport implementation
 that performs certificate validation. Availability redundancy is not chain

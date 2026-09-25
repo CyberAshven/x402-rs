@@ -79,6 +79,44 @@ pub trait FulcrumTransport: Clone + Send + Sync + 'static {
     async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError>;
 }
 
+/// Sequentially retries Fulcrum requests across caller-provided transports.
+///
+/// Endpoint construction, TLS certificate validation, and endpoint ordering
+/// remain application responsibilities. This helper only provides availability
+/// failover; it does not validate chain consistency or SPV proofs.
+#[derive(Clone)]
+pub struct FailoverFulcrumTransport<T> {
+    transports: Vec<T>,
+}
+
+impl<T> FailoverFulcrumTransport<T> {
+    pub fn new(transports: Vec<T>) -> Result<Self, BchProviderError> {
+        if transports.is_empty() {
+            return Err(BchProviderError::InvalidResponse(
+                "at least one Fulcrum transport is required".to_string(),
+            ));
+        }
+        Ok(Self { transports })
+    }
+}
+
+#[async_trait]
+impl<T: FulcrumTransport> FulcrumTransport for FailoverFulcrumTransport<T> {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError> {
+        let mut errors = Vec::new();
+        for transport in &self.transports {
+            match transport.request(method, params.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        Err(BchProviderError::Transport(format!(
+            "all Fulcrum transports failed: {}",
+            errors.join("; ")
+        )))
+    }
+}
+
 /// A newline-delimited Electrum JSON-RPC connection.
 #[derive(Clone)]
 pub struct FulcrumTcpTransport {

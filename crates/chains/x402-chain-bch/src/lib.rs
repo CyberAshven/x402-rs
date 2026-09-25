@@ -18,8 +18,8 @@ pub mod v2_bch_exact;
 
 pub use chain::{BCH_NAMESPACE, BchChainReference, BchChainReferenceFormatError};
 pub use provider::{
-    BchChainProvider, BchProviderError, BchTransactionStatus, BchUtxo, FulcrumProvider,
-    FulcrumTcpTransport, FulcrumTransport,
+    BchChainProvider, BchProviderError, BchTransactionStatus, BchUtxo, FailoverFulcrumTransport,
+    FulcrumProvider, FulcrumTcpTransport, FulcrumTransport,
 };
 pub use transaction::{
     BCH_SIGHASH_ALL_FORKID, BchPolicy, BchTransaction, OutPoint, SourceOutput, TxId,
