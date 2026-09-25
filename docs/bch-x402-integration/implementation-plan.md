@@ -61,7 +61,8 @@ Implement and test:
 - UI/P2P TXID byte-order conversion.
 - Source-output representation.
 - BCH signing serialization.
-- `0x61` signature construction and verification.
+- `0x41` (`SIGHASH_ALL | SIGHASH_FORKID`) signature construction and
+  verification.
 - P2PKH locking/unlocking scripts.
 - Checked satoshi arithmetic.
 
@@ -124,7 +125,10 @@ Verification must be read-only and must prove:
 
 Settlement must re-verify, broadcast the same raw transaction, handle already
 known identical transactions idempotently, detect conflicts, and return the
-TXID with `bch:*` network identity. If broadcast succeeded but status cannot be
+TXID with `bch:*` network identity. It must apply the configured settlement
+strategy: explicit mempool acceptance, provider-verified BCH double-spend
+proof evidence, or a required confirmation count. A 0-conf strategy is an
+explicit opt-in. If broadcast succeeded but the selected status cannot be
 established, return a `settlement_pending` result with the TXID so the resource
 server can reconcile instead of blindly rebroadcasting. The x402-rs paygate
 must run this settlement path before resource execution for the advertised
@@ -207,7 +211,8 @@ These are distinct security models and should not be hidden behind the native
 - Address round trips across every supported encoding, including wrong-network
   and ambiguous-prefix rejection.
 - Transaction encoding and TXID vectors.
-- BCH sighash vectors, including `0x61`.
+- BCH sighash vectors for `0x41`; reserve `0x61` coverage for a later
+  `UTXOS`-aware phase.
 - DER/public-key/signature validation.
 - Satoshi overflow and fee arithmetic.
 - Exact payment-output matching.

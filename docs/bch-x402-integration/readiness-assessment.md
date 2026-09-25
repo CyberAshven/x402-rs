@@ -40,6 +40,42 @@ The first release can be reliable if it explicitly supports only:
 CashTokens, P2SH/CashScript, alternate address encodings, PSBT, sponsorship,
 `upto`, and batch settlement must be advertised as unsupported in this release.
 
+## Decisions accepted for the initial implementation
+
+The following choices are now fixed for the POC and must be shared by the
+TypeScript and Rust implementations:
+
+- Use fully prefixed CashAddr values at the wire boundary.
+- Encode the raw transaction as standard padded RFC 4648 base64.
+- Encode BCH amounts as canonical unsigned decimal satoshi strings.
+- Require accepted payment data to match the facilitator requirements; unknown
+  fields are not an alternate way to change the requested payment.
+- Treat `maxTimeoutSeconds` as an off-chain resource/request acceptance window.
+  It is not a transaction expiry and cannot be inferred from a BCH transaction
+  alone.
+- Use standard BCH P2PKH scripts and the ordinary BCH signature hash byte
+  `0x41` (`SIGHASH_ALL | SIGHASH_FORKID`) with strict signature/public-key
+  validation. The newer `0x61` `UTXOS` flag is not required for this POC.
+- Build exactly one merchant output and, when the remainder is above the
+  applicable dust threshold, exactly one P2PKH change output. A remainder too
+  small to create a standard change output is absorbed into the fee rather than
+  emitted as dust.
+- Target a fee rate of 1 satoshi per serialized transaction byte. The client
+  builds at that rate and the facilitator enforces the minimum; the signed
+  transaction's complete byte length is the measurement basis.
+- Make settlement acceptance configurable: explicit 0-conf/mempool mode,
+  double-spend-proof-assisted mode where the provider supports it, or a
+  confirmation-count mode. 0-conf is opt-in and is not the conservative
+  default.
+- Treat BCH transactions as atomic consensus state transitions. The x402
+  error model still needs machine-readable off-chain reasons for invalid
+  input, provider, broadcast, conflict, and indeterminate-status conditions;
+  these do not represent Ethereum-style partial execution or consumed gas.
+
+The provider/signer "contracts" described below are software API contracts,
+not CashScript contracts. The initial implementation does not execute or
+validate CashScript: it validates standard P2PKH scripts and BCH transactions.
+
 ## Decisions still to lock
 
 These decisions affect interoperability or security and cannot be left to
@@ -47,19 +83,10 @@ individual SDK implementations.
 
 ### Wire representation
 
-- Whether `payTo` must contain a fully prefixed CashAddr
-  (`bitcoincash:...` / `bchtest:...`) or may omit the prefix. The recommended
-  choice is the fully prefixed form.
-- Whether `payload.transaction` is standard padded RFC 4648 base64 of the raw
-  transaction bytes, with no JSON wrapper or alternate hex form.
-- Canonical amount grammar: decimal ASCII digits, no sign or fractional value,
-  no non-canonical leading zeroes, and an explicit maximum.
-- Whether `payload.accepted` must deep-equal the facilitator requirements,
-  including `extra`, and how unknown extra keys are handled.
-- What `maxTimeoutSeconds` means for BCH. A normal BCH transaction has no
-  signed expiry, so this must be an HTTP/resource acceptance deadline or an
-  explicitly documented non-cryptographic hint; it must not be presented as a
-  transaction expiry that BCH cannot enforce.
+The representation choices are fixed above. The normative scheme document
+still needs to spell out the exact maximum amount, equality algorithm, and
+unknown-field behavior so that both SDKs implement the same rules rather than
+relying on a prose interpretation.
 
 ### Transaction policy
 
@@ -69,19 +96,24 @@ individual SDK implementations.
   additional outputs paying the same script.
 - Allowed `nLockTime`, input sequence values, script sizes, transaction size,
   input count, and output count.
-- Minimum fee policy, maximum fee policy, and dust policy. These must be
-  explicit because BCH consensus validity and node relay policy are different
-  things.
-- The accepted BCH sighash byte and signature encoding. The POC recommendation
-  is `0x61` (`ALL | FORKID | UTXOS`) with strict DER and public-key checks.
+- The precise version of the existing BCH relay/dust policy to implement and
+  whether a deployment may configure a stricter policy. The POC fee target and
+  one-merchant/one-change rule are fixed above, but consensus validity and node
+  relay policy remain distinct.
+- The allowed locktime, sequence, script-size, transaction-size, input-count,
+  and output-count limits.
 - How unconfirmed source inputs are treated and which provider states prove an
-  outpoint is spendable.
+  outpoint is spendable. The facilitator must fetch the previous output's
+  value and locking script itself: transaction inputs contain only outpoints,
+  so client-supplied source data cannot be authoritative for BCH sighash or
+  value validation.
 
 ### Settlement and replay
 
-- Whether `success: true` means node/mempool acceptance or one confirmation by
-  default. The recommendation is one confirmation for the conservative default
-  and an explicit mempool mode for low-latency deployments.
+- The exact configuration and response vocabulary for mempool acceptance,
+  cryptographically/verifiably checked BCH double-spend-proof evidence, and a
+  required confirmation count. The strategy is configurable, with 0-conf
+  opt-in; the default for a public deployment should remain conservative.
 - Exact `settlement_pending` response shape and retry/reconciliation rules.
 - Whether a repeated identical TXID is idempotent, rejected as already used, or
   accepted only when the resource server supplies an application-level
@@ -90,14 +122,18 @@ individual SDK implementations.
   paid resources before its inputs are confirmed. This is not solved by BCH's
   UTXO double-spend rule alone; the resource server/facilitator boundary must
   define one-time consumption or request binding.
-- Stable machine-readable error codes for malformed transactions, invalid
-  signatures, source-output failures, conflicts, unsupported tokens, and
-  pending settlement.
+- The exact stable machine-readable error-code names for malformed
+  transactions, invalid signatures, source-output failures, conflicts,
+  unsupported tokens, and pending settlement. These are API interoperability
+  errors, not claims that a BCH transaction can partially execute.
 
 ### SDK and operational surface
 
-- Public package names, registration helpers, signer interfaces, provider
-  interfaces, supported feature flags, and versioning for TypeScript and Rust.
+- Public package names, registration helpers, and the exact signer/provider
+  method surfaces, supported feature flags, and versioning for TypeScript and
+  Rust. The conceptual boundary is fixed: the client signer builds/signs; the
+  facilitator provider resolves authoritative source outputs, spentness,
+  broadcast, and status; neither boundary is a CashScript contract.
 - At least one supported BCHN/Fulcrum-compatible provider implementation or a
   documented adapter contract with tested examples.
 - Node, Rust, and dependency support ranges; testnet setup; fee configuration;
@@ -132,7 +168,7 @@ documented boundary.
 The TypeScript and Rust implementations need shared JSON fixtures for:
 
 - Valid one-input and multi-input P2PKH transactions.
-- BCH `0x61` signing serialization and signatures.
+- BCH `0x41` signing serialization and signatures.
 - Transaction IDs and byte-order conversion.
 - CashAddr/script round trips on mainnet and Chipnet.
 - Exact output matching with change.

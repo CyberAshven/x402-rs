@@ -74,7 +74,7 @@ Decision: phase the work so transaction primitives and security invariants are
 complete before the HTTP-facing client and facilitator are advertised as
 usable.
 
-## Current decisions that are still provisional
+## Iteration 6 provisional decisions (superseded or retained below)
 
 The following are recommendations awaiting explicit confirmation or an
 implementation-time decision recorded here:
@@ -86,7 +86,9 @@ implementation-time decision recorded here:
 - Support standard P2PKH inputs and CashAddr recipients first.
 - Fetch source outputs from the facilitator's chain provider, rather than
   trusting source-output data supplied by the client.
-- Use BCH `0x61` (`ALL | FORKID | UTXOS`) for client signatures.
+- The provisional signature recommendation at this stage was BCH `0x61`
+  (`ALL | FORKID | UTXOS`); this was superseded by the standard P2PKH `0x41`
+  decision in Iteration 11.
 - Treat mainnet/chipnet as public identities and add a separate local test
   identity only if the test harness needs one.
 - Reject CashToken-bearing transactions until token conservation is implemented.
@@ -186,3 +188,31 @@ Decision: do not let either SDK choose these independently. Resolve them in the
 shared scheme specification and fixtures before publishing a third-party
 release. CashTokens, PSBT, custom addresses, sponsorship, and advanced schemes
 remain explicitly deferred rather than being hidden unresolved behavior.
+
+## Iteration 11 — accepted POC transaction and settlement policy
+
+The user resolved the main policy questions for an initial implementation:
+
+- Timeout is an off-chain resource/request acceptance policy. It is not a
+  signed BCH transaction expiry.
+- The POC uses standard P2PKH, existing BCH dust policy, a 1 sat/byte target,
+  one merchant output, and one change output for a non-dust remainder. A
+  below-dust remainder is absorbed into the fee.
+- Standard BCH P2PKH signatures use `0x41`,
+  `SIGHASH_ALL | SIGHASH_FORKID`. The `0x61` `UTXOS` flag is deferred.
+- Settlement supports configurable mempool/0-conf, double-spend-proof-assisted,
+  or confirmation-count strategies. 0-conf must be explicitly enabled.
+- BCH consensus transactions are atomic. x402 still needs off-chain error
+  codes for invalid data, provider failures, conflicts, broadcast failures, and
+  indeterminate settlement; these do not model Ethereum-style failed execution.
+- The provider and signer boundaries refer to software interfaces, not
+  CashScript contracts. The facilitator's provider remains authoritative for
+  source-output value/script and spentness.
+- Shared fixtures may be sourced from libauth and other projects, then
+  independently cross-validated and supplemented with locally generated test
+  vectors. Provenance and expected decoded/serialized values must be recorded.
+
+The remaining work is to turn these decisions into a normative wire document,
+exact provider/API method surfaces, precise relay-policy/version limits, replay
+and idempotency rules, and cross-language fixtures. These are implementation
+conformance details rather than reasons to revisit the BCH-vs-Ethereum model.

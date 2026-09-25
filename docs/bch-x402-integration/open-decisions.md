@@ -55,12 +55,17 @@ the flow vocabulary defined by canonical x402.
 
 ## 3. Confirmation threshold
 
-Recommended default: make the threshold configurable, with `mempool accepted`
-as an explicit low-latency mode and at least one confirmation as the conservative
-production mode.
+Recommended default: make the settlement strategy configurable. Supported
+initial strategies should include explicit `mempool accepted` (0-conf), a
+provider capability for verified BCH double-spend-proof evidence, and a
+required confirmation count. 0-conf must be an explicit opt-in; at least one
+confirmation remains the conservative production mode.
 
-The settlement response must distinguish confirmed, mempool-only, and pending
-states. A transport error after broadcast must not cause an unsafe blind retry.
+The settlement response must distinguish confirmed, mempool-only,
+double-spend-proof-assisted, and pending states. A transport error after
+broadcast must not cause an unsafe blind retry. A double-spend proof is
+additional network-state evidence for an unconfirmed transaction, not a reason
+to skip transaction, source-output, or conflict validation.
 
 ## 4. Initial script scope
 
@@ -72,6 +77,12 @@ CashScript should be separate milestones. Additional address encodings may be
 accepted in a later phase, but they must resolve to a validated locking script
 before transaction policy checks are performed.
 
+The POC transaction shape is one merchant output plus one P2PKH change output
+when the remainder meets the applicable dust threshold. A below-dust remainder
+is added to the fee rather than emitted as an invalid dust output. The target
+fee rate is 1 satoshi per serialized byte, measured on the complete signed
+transaction.
+
 ## 5. Source-output transport
 
 Recommended default: the client sends only the signed transaction; the
@@ -80,6 +91,12 @@ facilitator fetches source outputs from its configured provider.
 Client-supplied source outputs may be useful as a cache hint, but must never be
 authoritative. If they are added later, the facilitator must compare them with
 chain data.
+
+This is a software/provider boundary, not a CashScript contract. The
+facilitator needs the authoritative previous-output value and locking script to
+validate BCH sighash preimages, P2PKH signatures, and value conservation;
+those fields are not carried in a transaction input itself. Unknown provider
+state must fail closed.
 
 ## 6. Local test identity
 
