@@ -24,6 +24,9 @@ facilitator. It must define:
 - Replay and idempotency behavior.
 
 No aliases should be accepted unless the specification explicitly defines them.
+The initial contract should describe finalized raw transactions only. PSBT is
+planned as a signing/interchange layer and should not be added to the x402
+settlement payload until its BCH fields and finalization rules are specified.
 
 ## Phase 1 — BCH primitives
 
@@ -33,10 +36,12 @@ Suggested crate structure:
 crates/chains/x402-chain-bch/src/
   chain.rs
   address.rs
+  assets.rs
   transaction.rs
   sighash.rs
   utxo.rs
   provider.rs
+  psbt.rs
   v2_bch_exact/
     mod.rs
     types.rs
@@ -47,7 +52,8 @@ crates/chains/x402-chain-bch/src/
 
 Implement and test:
 
-- CashAddr decoding to locking bytecode.
+- Script-first address normalization, with CashAddr decoding to locking
+  bytecode in the initial phase.
 - Mainnet/chipnet prefix validation.
 - Transaction encode/decode with canonical varints.
 - UI/P2P TXID byte-order conversion.
@@ -56,6 +62,10 @@ Implement and test:
 - `0x61` signature construction and verification.
 - P2PKH locking/unlocking scripts.
 - Checked satoshi arithmetic.
+
+Address parsing and serialization should remain separate from transaction
+validation so later legacy, token-aware, or other BCH address formats can be
+added without making text addresses the domain identity.
 
 The implementation should use libauth vectors for transaction encoding,
 hashing, signing serialization, and VM-compatible P2PKH behavior.
@@ -133,7 +143,7 @@ Add:
 
 ## Phase 6 — CashTokens
 
-Add a separate typed asset model for:
+Add a separate typed asset model in `assets.rs` for:
 
 - Fungible token categories and amounts.
 - NFT commitments.
@@ -147,7 +157,28 @@ CashToken support must not be enabled merely because a transaction can be
 parsed. Verification must prove both BCH value correctness and token-state
 correctness.
 
-## Phase 7 — optional advanced mechanisms
+## Phase 7 — address and PSBT interoperability
+
+Add address and signing interoperability only after the native BCH path has
+stable vectors and security checks:
+
+- Support the required BCH address encodings, including legacy Base58 and
+  token-aware formats where the product needs them.
+- Preserve network, locking-script, and token metadata through parse/serialize
+  round trips.
+- Parse and serialize BCH PSBTs without dropping unknown or proprietary data.
+- Define source-output and BCH sighash fields needed for offline or
+  hardware-wallet signing.
+- Support partial-signature exchange and deterministic finalization into the
+  raw transaction consumed by x402.
+- Run the same UTXO, value, asset, signature, and output checks on a raw
+  transaction finalized from PSBT.
+
+PSBT is an interoperability mechanism for wallets and signers. It does not
+change the POC settlement contract: the facilitator still verifies and
+broadcasts the finalized transaction, not an unfinished PSBT.
+
+## Phase 8 — optional advanced mechanisms
 
 Evaluate separately:
 
@@ -166,12 +197,16 @@ These are distinct security models and should not be hidden behind the native
 
 - Network identity and address-prefix rejection.
 - CashAddr/script round trips.
+- Address round trips across every supported encoding, including wrong-network
+  and ambiguous-prefix rejection.
 - Transaction encoding and TXID vectors.
 - BCH sighash vectors, including `0x61`.
 - DER/public-key/signature validation.
 - Satoshi overflow and fee arithmetic.
 - Exact payment-output matching.
 - Token-prefix rejection.
+- PSBT round trips, partial-signature exchange, finalization, and preservation
+  of unknown/proprietary fields.
 
 ### Negative and adversarial tests
 
@@ -180,6 +215,7 @@ These are distinct security models and should not be hidden behind the native
 - Duplicate payment outputs.
 - Missing source output.
 - Source-output substitution.
+- PSBT source-output substitution and mismatched finalized-transaction checks.
 - Invalid varints and trailing bytes.
 - Unsupported sighash flags.
 - Spent and conflicting outpoints.

@@ -3,6 +3,18 @@
 These are the decisions to confirm before the implementation crosses the wire
 compatibility boundary. The defaults are recommendations, not hidden choices.
 
+## POC versus long-term interoperability
+
+The first proof of concept is intentionally narrow: native BCH, standard
+P2PKH inputs, CashAddr recipients, and a finalized signed transaction as the
+payment payload. Those limits are staging boundaries, not permanent protocol
+limits.
+
+The implementation should keep a script-, UTXO-, and asset-first internal
+model so that later work can add CashTokens, additional BCH address encodings,
+and PSBT signing/interchange without changing the meaning of the initial
+native-BCH wire contract.
+
 ## 1. Native asset spelling
 
 Recommended default: use:
@@ -43,7 +55,9 @@ Recommended default: standard P2PKH only, with multiple inputs allowed.
 
 This permits independent BCH signature verification without pretending to
 support arbitrary CashScript or covenant semantics. P2SH, P2SH32, and arbitrary
-CashScript should be separate milestones.
+CashScript should be separate milestones. Additional address encodings may be
+accepted in a later phase, but they must resolve to a validated locking script
+before transaction policy checks are performed.
 
 ## 5. Source-output transport
 
@@ -69,6 +83,10 @@ Recommended default: reject token-bearing inputs and outputs in native BCH
 exact until token conservation and successor-output validation are implemented.
 
 Parsing a CashToken prefix is not equivalent to proving token correctness.
+The future asset model must keep BCH value and token state separate, including
+fungible amounts, NFT commitments and capabilities, genesis rules, and
+successor-output requirements. A token-aware address must not silently turn a
+token payment into a native-BCH payment or vice versa.
 
 ## 8. Payer reporting
 
@@ -81,3 +99,31 @@ all inputs independently and must not rely on the reported payer string.
 Recommended default: client pays its own fee. Do not allow facilitators to
 append inputs or mutate a signed transaction. Sponsorship requires a separately
 specified sighash and signing protocol.
+
+## 10. Address format extensibility
+
+Recommended default: treat addresses as input/output encodings at the API
+boundary, then normalize them to an internal network-qualified locking script
+plus any explicit token metadata.
+
+The POC should use CashAddr, but future support may include legacy Base58
+addresses, token-aware CashToken addresses, and other BCH ecosystem formats.
+The parser must validate the network, address type, checksum, payload length,
+and token metadata before producing a script. Network or asset identity must
+never be inferred from a text prefix alone, and serializing an address must not
+discard token information.
+
+## 11. PSBT support
+
+Recommended default: keep the initial x402 payment payload as a finalized raw
+transaction. Add PSBT as a wallet and signing interchange format, not as an
+alternative settlement object, until BCH-specific PSBT semantics are defined.
+
+Future PSBT support should cover unsigned transaction data, authoritative
+source outputs, BCH sighash metadata, partial signatures, hardware-wallet
+signing, finalization, and preservation of unknown/proprietary fields. The
+facilitator should validate the finalized transaction using the same rules
+regardless of whether the client assembled it directly or finalized it from a
+PSBT. A PSBT should not be accepted for settlement merely because it can be
+parsed; it must produce the exact signed transaction being verified and
+broadcast.

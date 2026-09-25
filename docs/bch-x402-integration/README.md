@@ -33,6 +33,20 @@ The first implementation target is x402 v2 `exact` for native BCH:
 This preserves the canonical x402 transport and facilitator flow while adapting
 the authorization object to BCH's transaction-based authorization model.
 
+## Future interoperability scope
+
+The POC deliberately starts with native BCH, P2PKH, CashAddr, and finalized
+raw transactions. The long-term design leaves room for:
+
+- CashTokens with typed asset conservation and successor-output validation.
+- Multiple BCH address encodings, normalized internally to validated locking
+  scripts and explicit token metadata.
+- PSBT-based offline and hardware-wallet signing, finalized before x402
+  verification and settlement.
+
+These additions are compatibility milestones, not reasons to broaden the POC
+wire contract prematurely.
+
 ## Primary references
 
 - `crates/x402-types/src/scheme/client.rs` — client scheme extension point.

@@ -89,3 +89,18 @@ implementation-time decision recorded here:
 - Treat mainnet/chipnet as public identities and add a separate local test
   identity only if the test harness needs one.
 - Reject CashToken-bearing transactions until token conservation is implemented.
+
+## Iteration 7 — future BCH interoperability scope
+
+The initial open-decisions document is acceptable for a proof of concept, but
+the eventual BCH integration must cover more than native P2PKH transactions.
+The requested future capabilities are CashTokens, additional/custom BCH
+address formats, and PSBT support.
+
+Decision: preserve the POC's narrow settlement contract while designing the
+internal model around scripts, UTXOs, and typed assets. CashTokens will require
+explicit token conservation and successor validation. Address formats will be
+normalized to validated locking scripts plus token metadata. PSBT will be a
+wallet/signing interchange format whose output must be finalized into the raw
+transaction verified and broadcast by x402; it will not be treated as a
+settlement authorization merely because it parses.
