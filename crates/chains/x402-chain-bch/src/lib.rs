@@ -10,6 +10,18 @@
 //! WalletConnect integrations and would make x402 payments needlessly
 //! incompatible with BCH applications.
 
+pub mod address;
 pub mod chain;
+pub mod provider;
+pub mod transaction;
+pub mod v2_bch_exact;
 
 pub use chain::{BCH_NAMESPACE, BchChainReference, BchChainReferenceFormatError};
+pub use provider::{
+    BchChainProvider, BchProviderError, BchTransactionStatus, BchUtxo, FulcrumProvider,
+    FulcrumTcpTransport, FulcrumTransport,
+};
+pub use transaction::{
+    BCH_SIGHASH_ALL_FORKID, BchPolicy, BchTransaction, OutPoint, SourceOutput, TxId,
+};
+pub use v2_bch_exact::{BchExtra, ExactBchPayload, V2BchExact, V2BchExactClient};
