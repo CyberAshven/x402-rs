@@ -1,0 +1,18 @@
+[package]
+name = "x402-chain-bch"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Bitcoin Cash network identity support for the x402 payment protocol"
+readme = "README.md"
+
+[dependencies]
+x402-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

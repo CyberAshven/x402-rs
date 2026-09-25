@@ -8,6 +8,7 @@ members = [
   "crates/chains/x402-chain-eip155",
   "crates/chains/x402-chain-solana",
   "crates/chains/x402-chain-aptos",
+  "crates/chains/x402-chain-bch",
   "crates/chains/x402-chain-tron",
   "facilitator",
   "examples/x402-axum-example",
@@ -29,6 +30,7 @@ categories = ["cryptography::cryptocurrencies", "finance", "network-programming"
 [workspace.dependencies]
 x402-axum = { version = "2.0", path = "crates/x402-axum" }
 x402-chain-aptos = { version = "2.0", path = "crates/chains/x402-chain-aptos" }
+x402-chain-bch = { version = "2.0", path = "crates/chains/x402-chain-bch" }
 x402-chain-eip155 = { version = "2.0", path = "crates/chains/x402-chain-eip155" }
 x402-chain-solana = { version = "2.0", path = "crates/chains/x402-chain-solana" }
 x402-chain-tron = { version = "0.2", path = "crates/chains/x402-chain-tron" }

@@ -1,0 +1,202 @@
+# BCH x402 implementation plan
+
+## Goal
+
+Add Bitcoin Cash support to x402-rs without changing the canonical x402 v2
+transport. BCH-specific behavior belongs in `x402-chain-bch`; generic x402
+HTTP and facilitator plumbing should remain reusable.
+
+## Phase 0 — freeze the wire contract
+
+Write the BCH exact scheme specification before implementing the client or
+facilitator. It must define:
+
+- `bch:bitcoincash` and `bch:bchtest` network identities.
+- Scheme name `exact` and x402 version 2.
+- Native-asset spelling and `assetTransferMethod`.
+- Satoshi amount encoding.
+- CashAddr format and network-prefix rules.
+- Signed transaction payload encoding.
+- Exact payment-output semantics.
+- Fee, dust, transaction-size, and input-count policies.
+- Payer derivation and settlement-response semantics.
+- Mempool versus confirmation requirements.
+- Replay and idempotency behavior.
+
+No aliases should be accepted unless the specification explicitly defines them.
+
+## Phase 1 — BCH primitives
+
+Suggested crate structure:
+
+```text
+crates/chains/x402-chain-bch/src/
+  chain.rs
+  address.rs
+  transaction.rs
+  sighash.rs
+  utxo.rs
+  provider.rs
+  v2_bch_exact/
+    mod.rs
+    types.rs
+    client.rs
+    server.rs
+    facilitator.rs
+```
+
+Implement and test:
+
+- CashAddr decoding to locking bytecode.
+- Mainnet/chipnet prefix validation.
+- Transaction encode/decode with canonical varints.
+- UI/P2P TXID byte-order conversion.
+- Source-output representation.
+- BCH signing serialization.
+- `0x61` signature construction and verification.
+- P2PKH locking/unlocking scripts.
+- Checked satoshi arithmetic.
+
+The implementation should use libauth vectors for transaction encoding,
+hashing, signing serialization, and VM-compatible P2PKH behavior.
+
+## Phase 2 — UTXO provider boundary
+
+Define a BCH provider trait that can be implemented by BCHN RPC, Fulcrum, and
+test providers. It should expose:
+
+- Spendable-UTXO discovery.
+- Source transaction/output lookup.
+- Outpoint spentness.
+- Mempool lookup.
+- Raw transaction broadcast.
+- Confirmation/status polling.
+- Chain identity.
+
+The provider must distinguish not-found, spent, conflicting, mempool, and
+confirmed states. A generic network error must not be treated as proof that an
+outpoint is spendable.
+
+## Phase 3 — client-side v2 exact
+
+Implement `V2BchExactClient` using the existing x402-rs client trait.
+
+Client flow:
+
+1. Parse and validate the selected requirements.
+2. Select UTXOs sufficient for amount plus fee.
+3. Reject token-bearing UTXOs in the native-BCH phase.
+4. Build the payment and change outputs.
+5. Enforce dust and fee policies.
+6. Sign every input with BCH replay protection.
+7. Serialize the complete signed transaction.
+8. Return the x402 payload containing the transaction.
+
+The first implementation should support multiple P2PKH inputs, but should not
+claim support for arbitrary CashScript inputs.
+
+## Phase 4 — facilitator verification and settlement
+
+Verification must be read-only and must prove:
+
+- Accepted requirements exactly match the request requirements.
+- Network and asset are supported.
+- CashAddr resolves to the requested payment script.
+- Every input has an authoritative source output.
+- Every input signature is valid under BCH signing rules.
+- All source inputs are unspent or otherwise valid for mempool acceptance.
+- Input value covers output value and fee.
+- Exactly one output pays the requested script and exact amount.
+- CashTokens are absent in the native-only phase.
+- Transaction policy limits are satisfied.
+
+Settlement must re-verify, broadcast the same raw transaction, handle already
+known identical transactions idempotently, detect conflicts, and return the
+TXID with `bch:*` network identity. If broadcast succeeded but status cannot be
+established, return a pending settlement result with the TXID.
+
+The first server integration should use settle-before-resource execution. A
+plain BCH transaction cannot be reserved by `/verify`, and verification alone
+does not prevent a conflicting spend.
+
+## Phase 5 — x402-rs integration and documentation
+
+Add:
+
+- `V2BchExact::price_tag`.
+- BCH examples for Axum and Reqwest.
+- Facilitator registration examples.
+- `/supported` output examples.
+- A BCH exact scheme specification.
+- Error mapping for invalid transactions, spent inputs, conflicts, and pending
+  settlement.
+
+## Phase 6 — CashTokens
+
+Add a separate typed asset model for:
+
+- Fungible token categories and amounts.
+- NFT commitments.
+- Immutable, mutable, and minting capabilities.
+- Genesis-input rules.
+- Token successor/conservation rules.
+- Token-aware output prefixes.
+- Token-aware address handling.
+
+CashToken support must not be enabled merely because a transaction can be
+parsed. Verification must prove both BCH value correctness and token-state
+correctness.
+
+## Phase 7 — optional advanced mechanisms
+
+Evaluate separately:
+
+- A BCH-specific batch-settlement mechanism inspired by, but not copied from,
+  `x402-bch`.
+- Upto/recurring payments using covenants, vouchers, channels, or escrow.
+- Facilitator fee sponsorship with an explicit signer and sighash protocol.
+- General CashScript/covenant verification through a BCH VM.
+
+These are distinct security models and should not be hidden behind the native
+`exact` implementation.
+
+## Testing requirements
+
+### Unit and vector tests
+
+- Network identity and address-prefix rejection.
+- CashAddr/script round trips.
+- Transaction encoding and TXID vectors.
+- BCH sighash vectors, including `0x61`.
+- DER/public-key/signature validation.
+- Satoshi overflow and fee arithmetic.
+- Exact payment-output matching.
+- Token-prefix rejection.
+
+### Negative and adversarial tests
+
+- Wrong network.
+- Wrong payee or amount.
+- Duplicate payment outputs.
+- Missing source output.
+- Source-output substitution.
+- Invalid varints and trailing bytes.
+- Unsupported sighash flags.
+- Spent and conflicting outpoints.
+- Excessive fees, inputs, outputs, or transaction size.
+- Replayed identical transactions.
+- Concurrent settlement attempts.
+
+### End-to-end tests
+
+Use a mocked provider first, then a local BCH node/chipnet harness. The full
+test should exercise:
+
+```text
+402 -> client selection -> transaction build/sign
+    -> PAYMENT-SIGNATURE -> verify -> settle/broadcast
+    -> PAYMENT-RESPONSE
+```
+
+All successful transaction fixtures should be checked against libauth's BCH
+transaction decoder and signing/VM behavior.

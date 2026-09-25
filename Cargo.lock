@@ -13845,6 +13845,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "x402-chain-bch"
+version = "2.0.2"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "x402-types",
+]
+
+[[package]]
 name = "x402-chain-eip155"
 version = "2.0.2"
 dependencies = [
