@@ -13,14 +13,16 @@
 pub mod address;
 pub mod chain;
 pub mod provider;
+pub mod settlement;
 pub mod transaction;
 pub mod v2_bch_exact;
 
 pub use chain::{BCH_NAMESPACE, BchChainReference, BchChainReferenceFormatError};
 pub use provider::{
-    BchChainProvider, BchProviderError, BchTransactionStatus, BchUtxo, FailoverFulcrumTransport,
-    FulcrumProvider, FulcrumTcpTransport, FulcrumTransport,
+    BchChainProvider, BchOutpointStatus, BchProviderError, BchTransactionStatus, BchUtxo,
+    FailoverFulcrumTransport, FulcrumProvider, FulcrumTcpTransport, FulcrumTransport,
 };
+pub use settlement::{BchSettlementClaim, BchSettlementStore, InMemoryBchSettlementStore};
 pub use transaction::{
     BCH_SIGHASH_ALL_FORKID, BchPolicy, BchTransaction, OutPoint, SourceOutput, TxId,
 };

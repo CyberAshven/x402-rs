@@ -18,8 +18,8 @@ separate BCH-specific mechanism, but it must not define BCH `exact` behavior.
 
 ## Iteration 2 — x402-rs as the implementation target
 
-The implementation scope was narrowed to `/mnt/hdd/projects/x402-rs`. BCH
-transaction behavior is to be learned from `/mnt/hdd/projects/libauth`, but
+The implementation scope was narrowed to `x402-rs`. BCH transaction behavior
+is learned from libauth, but
 libauth's TypeScript architecture is not to be copied into Rust.
 
 Decision: create an independent Rust chain crate, `x402-chain-bch`, using
@@ -60,7 +60,7 @@ The requirement was then corrected to use `bitcoincash`, not `mainnet`.
 Decision: BCH identities are `bch:bitcoincash` and `bch:bchtest`. The typed
 identity layer rejects `bch:mainnet`, `bch:chipnet`, legacy aliases, and
 `bip122:*` identifiers. The source of truth is
-`/mnt/hdd/projects/OPTNWallet/src/redux/walletconnect/constants.ts`.
+the wallet's BCH network constants.
 
 ## Iteration 6 — parity review
 
@@ -110,10 +110,10 @@ settlement authorization merely because it parses.
 
 ## Iteration 8 — comparison with the official x402 library and x402-rs
 
-The local `/mnt/hdd/projects/x402` checkout was an empty repository, but its
+The TypeScript x402 checkout was an empty repository, but its
 configured official remote was fetched at `x402-foundation/x402` main commit
 `4fcf836cc393174130e1358577ce5d37356da1c3`. The official repository's current
-architecture is a useful compatibility reference, while `/mnt/hdd/projects/x402-rs`
+architecture is a useful compatibility reference, while `x402-rs`
 remains the implementation target.
 
 The comparison established four points:

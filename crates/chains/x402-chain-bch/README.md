@@ -19,9 +19,9 @@ merchant output, an optional non-dust P2PKH change output, and a minimum fee of
 non-P2PKH scripts are intentionally outside this scheme boundary.
 
 `FulcrumProvider` implements the Electrum Cash JSON-RPC boundary used by
-Fulcrum. The local BCH node/indexer reference checkout is
-`/home/lightswarm/projects/fulcrum`; applications may supply a TLS or
-WebSocket transport through the `FulcrumTransport` trait.
+Fulcrum. Applications may supply a TLS or WebSocket transport through the
+`FulcrumTransport` trait and should inject a shared `BchSettlementStore` for
+multi-process facilitator deployments.
 
 The adapter accounts for Fulcrum's two amount encodings: verbose transaction
 outputs are BCH decimal values, while blockchain.scripthash.listunspent returns
@@ -64,12 +64,9 @@ that performs certificate validation. Availability redundancy is not chain
 verification: applications should compare chain tip/header data across
 independent servers when making operational decisions.
 
-In the 2026-09-25 live smoke test, `bch.imaginary.cash` and
-`blackie.c3-soft.com` both passed the TypeScript provider over TLS and returned
-the same mainnet tip; `chipnet.bch.ninja` passed the same check for chipnet.
-`electroncash.dk` was reachable, but its TLS certificate was not trusted by a
-standard Node.js trust store. Do not disable certificate validation to include
-it in a failover set; use it only with an explicitly reviewed trust policy.
+Endpoint availability and chain consistency are deployment concerns and should
+be revalidated by each operator. Do not disable certificate validation for a
+failover endpoint.
 
 ```rust,ignore
 use x402_chain_bch::{BchChainReference, FulcrumProvider, FulcrumTcpTransport, V2BchExact};

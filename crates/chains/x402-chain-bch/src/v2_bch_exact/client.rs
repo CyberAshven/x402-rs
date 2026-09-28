@@ -1,5 +1,6 @@
 //! Client-side BCH transaction construction and signing.
 
+use alloy_primitives::U256;
 use async_trait::async_trait;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use x402_types::proto::v2::{ExtensionsJson, ResourceInfo, X402Version2};
@@ -13,8 +14,8 @@ use x402_types::util::Base64Bytes;
 use crate::address::{CashAddr, hash160, p2pkh_script};
 use crate::provider::{BchChainProvider, BchUtxo};
 use crate::transaction::{
-    BCH_SIGHASH_ALL_FORKID, BchPolicy, BchTransaction, OutPoint, SourceOutput, TxInput, TxOutput,
-    is_p2pkh_script, push_data,
+    BCH_SIGHASH_ALL_FORKID, BchPolicy, BchTransaction, TxInput, TxOutput, is_p2pkh_script,
+    parse_canonical_satoshi_amount, push_data,
 };
 use crate::v2_bch_exact::V2BchExact;
 use crate::v2_bch_exact::types::{ExactBchPayload, PaymentPayload, PaymentRequirements};
@@ -116,11 +117,11 @@ where
                 {
                     return None;
                 }
-                let amount = requirements.amount.parse::<u64>().ok()?;
+                let amount = parse_canonical_satoshi_amount(&requirements.amount).ok()?;
                 Some(PaymentCandidate {
                     chain_id: requirements.network.clone(),
                     asset: requirements.asset.clone(),
-                    amount: amount.into(),
+                    amount: U256::from_limbs([amount, 0, 0, 0]),
                     scheme: self.scheme().to_string(),
                     x402_version: self.x402_version(),
                     pay_to: requirements.pay_to.clone(),
@@ -160,10 +161,7 @@ where
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let pay_to = CashAddr::decode(&self.requirements.pay_to, network)
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
-        let amount = self
-            .requirements
-            .amount
-            .parse::<u64>()
+        let amount = parse_canonical_satoshi_amount(&self.requirements.amount)
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let signer_address = CashAddr {
             network,

@@ -17,7 +17,7 @@ use x402_types::chain::{ChainId, ChainProviderOps};
 
 use crate::address::{CashAddr, p2pkh_script};
 use crate::chain::BchChainReference;
-use crate::transaction::{BchTransaction, OutPoint, SourceOutput, TxId};
+use crate::transaction::{OutPoint, SourceOutput, TxId, is_p2pkh_script};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BchUtxo {
@@ -32,6 +32,13 @@ pub enum BchTransactionStatus {
     Mempool,
     Confirmed { height: u64 },
     Conflicted,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BchOutpointStatus {
+    Unspent,
+    Spent,
     Unknown,
 }
 
@@ -55,6 +62,12 @@ pub enum BchProviderError {
 #[async_trait]
 pub trait BchChainProvider: ChainProviderOps + Send + Sync {
     async fn source_output(&self, outpoint: &OutPoint) -> Result<SourceOutput, BchProviderError>;
+
+    async fn outpoint_status(
+        &self,
+        outpoint: &OutPoint,
+        source_output: &SourceOutput,
+    ) -> Result<BchOutpointStatus, BchProviderError>;
 
     async fn list_utxos(&self, address: &CashAddr) -> Result<Vec<BchUtxo>, BchProviderError>;
 
@@ -275,6 +288,50 @@ impl<T: FulcrumTransport> BchChainProvider for FulcrumProvider<T> {
         })
     }
 
+    async fn outpoint_status(
+        &self,
+        outpoint: &OutPoint,
+        source_output: &SourceOutput,
+    ) -> Result<BchOutpointStatus, BchProviderError> {
+        if !is_p2pkh_script(&source_output.script_pubkey) {
+            return Ok(BchOutpointStatus::Unknown);
+        }
+        let mut script_hash = Sha256::digest(&source_output.script_pubkey);
+        script_hash.reverse();
+        let result = self
+            .transport
+            .request(
+                "blockchain.scripthash.listunspent",
+                json!([hex::encode(script_hash), "exclude_tokens"]),
+            )
+            .await?;
+        let entries = result.as_array().ok_or_else(|| {
+            BchProviderError::InvalidResponse("listunspent is not an array".to_string())
+        })?;
+        let unspent = entries.iter().any(|entry| {
+            let token_free = entry
+                .get("tokenData")
+                .or_else(|| entry.get("token_data"))
+                .is_none_or(Value::is_null);
+            let txid_matches = entry
+                .get("tx_hash")
+                .or_else(|| entry.get("txid"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case(&outpoint.txid.to_string()));
+            let vout_matches = entry
+                .get("tx_pos")
+                .or_else(|| entry.get("vout"))
+                .and_then(Value::as_u64)
+                == Some(u64::from(outpoint.vout));
+            token_free && txid_matches && vout_matches
+        });
+        Ok(if unspent {
+            BchOutpointStatus::Unspent
+        } else {
+            BchOutpointStatus::Spent
+        })
+    }
+
     async fn list_utxos(&self, address: &CashAddr) -> Result<Vec<BchUtxo>, BchProviderError> {
         if address.network != self.network {
             return Err(BchProviderError::InvalidResponse(
@@ -282,7 +339,7 @@ impl<T: FulcrumTransport> BchChainProvider for FulcrumProvider<T> {
             ));
         }
         let script = p2pkh_script(&address.hash160);
-        let mut script_hash = Sha256::digest(script);
+        let mut script_hash = Sha256::digest(&script);
         script_hash.reverse();
         let result = self
             .transport

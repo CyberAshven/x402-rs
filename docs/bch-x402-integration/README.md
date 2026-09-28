@@ -67,13 +67,13 @@ wire contract prematurely.
 - `crates/x402-types/src/scheme/mod.rs` — facilitator and scheme registry.
 - `crates/chains/x402-chain-solana/src/v2_solana_exact/` — serialized signed
   transaction scheme pattern.
-- `/mnt/hdd/projects/libauth/src/lib/message/transaction-types.ts` — BCH
+- `libauth/src/lib/message/transaction-types.ts` — BCH
   transaction and source-output model.
-- `/mnt/hdd/projects/libauth/src/lib/message/transaction-encoding.ts` — BCH
+- `libauth/src/lib/message/transaction-encoding.ts` — BCH
   wire encoding and TXID byte-order behavior.
-- `/mnt/hdd/projects/libauth/src/lib/vm/instruction-sets/common/signing-serialization.ts`
+- `libauth/src/lib/vm/instruction-sets/common/signing-serialization.ts`
   — BCH signing serialization and sighash flags.
-- `/mnt/hdd/projects/OPTNWallet/src/redux/walletconnect/constants.ts` — BCH
+- `WalletConnect BCH network constants` — BCH
   WalletConnect network identifiers used by OPTN.
 
 ## Decision record

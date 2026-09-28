@@ -3,7 +3,7 @@
 use base64::Engine;
 use serde::Deserialize;
 use std::collections::HashMap;
-use x402_types::chain::ChainProviderOps;
+use std::sync::Arc;
 use x402_types::proto;
 use x402_types::proto::v2;
 use x402_types::scheme::{
@@ -11,9 +11,12 @@ use x402_types::scheme::{
 };
 
 use crate::address::CashAddr;
-use crate::provider::{BchChainProvider, BchProviderError, BchTransactionStatus};
+use crate::provider::{
+    BchChainProvider, BchOutpointStatus, BchProviderError, BchTransactionStatus,
+};
+use crate::settlement::{BchSettlementClaim, BchSettlementStore, InMemoryBchSettlementStore};
 use crate::transaction::{
-    BchPolicy, BchTransaction, SourceOutput, VerifiedPayment, verify_payment,
+    BchPolicy, BchTransaction, VerifiedPayment, parse_canonical_satoshi_amount, verify_payment,
 };
 use crate::v2_bch_exact::V2BchExact;
 use crate::v2_bch_exact::types::{BchExtra, ExactScheme, SettleRequest, VerifyRequest};
@@ -54,6 +57,7 @@ pub struct V2BchExactFacilitator<P> {
     provider: P,
     policy: BchPolicy,
     config: BchFacilitatorConfig,
+    settlement_store: Arc<dyn BchSettlementStore>,
 }
 
 impl<P> V2BchExactFacilitator<P> {
@@ -62,6 +66,24 @@ impl<P> V2BchExactFacilitator<P> {
             provider,
             policy,
             config,
+            settlement_store: Arc::new(InMemoryBchSettlementStore::default()),
+        }
+    }
+
+    pub fn with_settlement_store<S>(
+        provider: P,
+        policy: BchPolicy,
+        config: BchFacilitatorConfig,
+        settlement_store: Arc<S>,
+    ) -> Self
+    where
+        S: BchSettlementStore + 'static,
+    {
+        Self {
+            provider,
+            policy,
+            config,
+            settlement_store,
         }
     }
 }
@@ -106,8 +128,66 @@ where
         request: &proto::SettleRequest,
     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
         let request = SettleRequest::try_from(request)?;
-        let verified = verify_transfer(&self.provider, &request, self.policy).await?;
-        let expected_txid = verified.payment.txid;
+        let raw_transaction = base64::engine::general_purpose::STANDARD
+            .decode(&request.payment_payload.payload.transaction)
+            .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?;
+        let candidate_transaction = BchTransaction::parse(&raw_transaction)
+            .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?;
+        let expected_txid = candidate_transaction.txid();
+        let binding = serde_json::to_string(&(
+            &request.payment_requirements,
+            &request.payment_payload.resource,
+        ))
+        .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?;
+        match self
+            .settlement_store
+            .claim(&expected_txid.to_string(), &binding)
+            .await
+        {
+            BchSettlementClaim::Conflict => {
+                return Err(X402SchemeFacilitatorError::OnchainFailure(
+                    "transaction already claimed for another request".to_string(),
+                ));
+            }
+            BchSettlementClaim::Same => {
+                let status = self
+                    .provider
+                    .transaction_status(&expected_txid)
+                    .await
+                    .map_err(|error| {
+                        X402SchemeFacilitatorError::OnchainFailure(error.to_string())
+                    })?;
+                if !self.settlement_accepted(&expected_txid, status).await? {
+                    return Ok(v2::SettleResponse::Error {
+                        reason: format!("settlement_pending:{}", expected_txid),
+                        network: self.provider.chain_id().to_string(),
+                    }
+                    .into());
+                }
+                self.settlement_store
+                    .mark_accepted(&expected_txid.to_string())
+                    .await;
+                let verified =
+                    verify_transfer_with_spent(&self.provider, &request, self.policy, false)
+                        .await?;
+                return Ok(v2::SettleResponse::Success {
+                    payer: verified.payment.payer.to_string(),
+                    transaction: expected_txid.to_string(),
+                    network: self.provider.chain_id().to_string(),
+                }
+                .into());
+            }
+            BchSettlementClaim::Acquired => {}
+        }
+        let verified = match verify_transfer(&self.provider, &request, self.policy).await {
+            Ok(verified) => verified,
+            Err(error) => {
+                self.settlement_store
+                    .release(&expected_txid.to_string())
+                    .await;
+                return Err(error.into());
+            }
+        };
         let raw_transaction = verified.transaction.serialize();
         let txid = match self.provider.broadcast(&raw_transaction).await {
             Ok(txid) => txid,
@@ -116,6 +196,9 @@ where
                     expected_txid
                 }
                 _ => {
+                    self.settlement_store
+                        .release(&expected_txid.to_string())
+                        .await;
                     return Err(X402SchemeFacilitatorError::OnchainFailure(
                         error.to_string(),
                     ));
@@ -123,6 +206,9 @@ where
             },
         };
         if txid != expected_txid {
+            self.settlement_store
+                .release(&expected_txid.to_string())
+                .await;
             return Err(X402SchemeFacilitatorError::OnchainFailure(
                 "provider returned a transaction ID different from the signed transaction"
                     .to_string(),
@@ -135,6 +221,7 @@ where
             .await
             .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?;
         if self.settlement_accepted(&txid, status).await? {
+            self.settlement_store.mark_accepted(&txid.to_string()).await;
             return Ok(v2::SettleResponse::Success {
                 payer: verified.payment.payer.to_string(),
                 transaction: txid.to_string(),
@@ -220,6 +307,18 @@ pub async fn verify_transfer<P>(
 where
     P: BchChainProvider + Send + Sync,
 {
+    verify_transfer_with_spent(provider, request, policy, true).await
+}
+
+async fn verify_transfer_with_spent<P>(
+    provider: &P,
+    request: &VerifyRequest,
+    policy: BchPolicy,
+    require_unspent: bool,
+) -> Result<VerifiedBchPayment, proto::PaymentVerificationError>
+where
+    P: BchChainProvider + Send + Sync,
+{
     let payload = &request.payment_payload;
     let requirements = &request.payment_requirements;
     if &payload.accepted != requirements {
@@ -243,9 +342,7 @@ where
         .map_err(|_| proto::PaymentVerificationError::UnsupportedChain)?;
     let pay_to = CashAddr::decode(&requirements.pay_to, network)
         .map_err(|error| proto::PaymentVerificationError::InvalidFormat(error.to_string()))?;
-    let amount = requirements
-        .amount
-        .parse::<u64>()
+    let amount = parse_canonical_satoshi_amount(&requirements.amount)
         .map_err(|_| proto::PaymentVerificationError::InvalidPaymentAmount)?;
     let raw_transaction = base64::engine::general_purpose::STANDARD
         .decode(&payload.payload.transaction)
@@ -254,12 +351,22 @@ where
         .map_err(|error| proto::PaymentVerificationError::InvalidFormat(error.to_string()))?;
     let mut source_outputs = Vec::with_capacity(transaction.inputs.len());
     for input in &transaction.inputs {
-        source_outputs.push(
-            provider
-                .source_output(&input.outpoint)
+        let source_output = provider
+            .source_output(&input.outpoint)
+            .await
+            .map_err(provider_error)?;
+        if require_unspent
+            && provider
+                .outpoint_status(&input.outpoint, &source_output)
                 .await
-                .map_err(provider_error)?,
-        );
+                .map_err(provider_error)?
+                != BchOutpointStatus::Unspent
+        {
+            return Err(proto::PaymentVerificationError::TransactionSimulation(
+                "source output is not unspent".to_string(),
+            ));
+        }
+        source_outputs.push(source_output);
     }
     let payment = verify_payment(
         &transaction,

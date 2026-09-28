@@ -13848,6 +13848,7 @@ dependencies = [
 name = "x402-chain-bch"
 version = "2.0.2"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
  "base64 0.22.1",
  "hex",

@@ -9,6 +9,20 @@ use crate::chain::BchChainReference;
 
 pub const BCH_SIGHASH_ALL_FORKID: u32 = 0x41;
 
+pub fn parse_canonical_satoshi_amount(value: &str) -> Result<u64, TransactionError> {
+    if value.is_empty()
+        || (value != "0" && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(TransactionError::PolicyViolation(
+            "BCH amount must be canonical satoshis".to_string(),
+        ));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| TransactionError::ArithmeticOverflow)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TxId(pub [u8; 32]);
 
@@ -337,7 +351,15 @@ pub fn verify_payment(
             .checked_add(source_output.value)
             .ok_or(TransactionError::ArithmeticOverflow)?;
         let hash = transaction.verify_p2pkh_input(index, source_output)?;
-        payer_hash.get_or_insert(hash);
+        if let Some(existing) = payer_hash {
+            if existing != hash {
+                return Err(TransactionError::PolicyViolation(
+                    "all BCH inputs must belong to the same payer".to_string(),
+                ));
+            }
+        } else {
+            payer_hash = Some(hash);
+        }
     }
 
     let merchant_matches = transaction
@@ -582,6 +604,15 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x402_types::chain::ChainId;
+
+    #[test]
+    fn accepts_only_canonical_satoshi_amounts() {
+        assert_eq!(parse_canonical_satoshi_amount("0").unwrap(), 0);
+        assert_eq!(parse_canonical_satoshi_amount("1000").unwrap(), 1000);
+        assert!(parse_canonical_satoshi_amount("01").is_err());
+        assert!(parse_canonical_satoshi_amount("18446744073709551616").is_err());
+    }
 
     #[test]
     fn serializes_and_parses_a_minimal_transaction() {
@@ -636,25 +667,27 @@ mod tests {
         #[serde(rename_all = "camelCase")]
         struct Fixture {
             network: String,
-            amount: u64,
+            amount: String,
             pay_to: String,
-            source_value: u64,
+            source_value: String,
+            #[serde(rename = "sourceScriptPubKey")]
             source_script_pubkey: String,
             raw_transaction: String,
             txid: String,
             payer: String,
             serialized_size: usize,
-            fee: u64,
+            fee: String,
         }
 
         let fixture: Fixture =
             serde_json::from_str(include_str!("../test/fixtures/bch-exact-p2pkh.json")).unwrap();
-        let network = fixture.network.parse::<BchChainReference>().unwrap();
+        let network =
+            BchChainReference::try_from(fixture.network.parse::<ChainId>().unwrap()).unwrap();
         let transaction =
             BchTransaction::parse(&hex::decode(fixture.raw_transaction).unwrap()).unwrap();
         let pay_to = CashAddr::decode(&fixture.pay_to, network).unwrap();
         let source_output = SourceOutput {
-            value: fixture.source_value,
+            value: fixture.source_value.parse().unwrap(),
             script_pubkey: hex::decode(fixture.source_script_pubkey).unwrap(),
         };
         let verified = verify_payment(
@@ -662,14 +695,14 @@ mod tests {
             &[source_output],
             network,
             &pay_to.locking_script(),
-            fixture.amount,
+            fixture.amount.parse().unwrap(),
             BchPolicy::default(),
         )
         .unwrap();
 
         assert_eq!(verified.txid.to_string(), fixture.txid);
         assert_eq!(verified.payer.to_string(), fixture.payer);
-        assert_eq!(verified.fee, fixture.fee);
+        assert_eq!(verified.fee, fixture.fee.parse::<u64>().unwrap());
         assert_eq!(transaction.serialize().len(), fixture.serialized_size);
     }
 }

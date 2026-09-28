@@ -13,6 +13,7 @@ description = "Bitcoin Cash exact payment support for the x402 payment protocol"
 readme = "README.md"
 
 [dependencies]
+alloy-primitives = { workspace = true }
 x402-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
