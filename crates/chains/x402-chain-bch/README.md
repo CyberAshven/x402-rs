@@ -54,6 +54,10 @@ pull request merges, Rust callers can depend on the open branch:
 x402-chain-bch = { git = "https://github.com/CyberAshven/x402-rs", branch = "feat/bch-x402-rs-integration" }
 ```
 
+CashToken merchant satoshis are `extra.value` in this crate and in
+`@optnlabs/x402-bch`. This crate still accepts `tokenOutputValue` when reading
+an older message. The wallet request keeps its own `tokenOutputValue` field.
+
 - npm package: https://www.npmjs.com/package/@optnlabs/x402-bch
 - TypeScript pull request: https://github.com/OPTNLabs/x402-bch/pull/1
 - Rust pull request: https://github.com/lightswarm124/x402-rs/pull/1
@@ -89,7 +93,7 @@ and optional NFT capability/commitment data. Fungible token amounts, NFT
 commitments/capabilities, BCH output values, and token change are validated as
 separate UTXO invariants.
 
-When a CashToken price omits `tokenOutputValue`, the merchant output value
+When a CashToken price omits `value`, the merchant output value
 defaults to the greater of 1,000 satoshis, the configured policy dust
 threshold, and the standard relay dust of that output. NFT commitments may be
 empty or up to 128 bytes under the current consensus rule
@@ -97,7 +101,7 @@ empty or up to 128 bytes under the current consensus rule
 can make the relay dust larger than 1,000 satoshis. The older 828-satoshi
 figure is the relay dust of a 40-byte commitment on the largest locking
 script this crate pays; it is not the maximum for a 128-byte commitment. An
-explicit `tokenOutputValue` is preserved and must still pass the size-based
+explicit `value` is preserved and must still pass the size-based
 dust check. A 129-byte commitment is rejected. Native BCH outputs keep the
 546-satoshi dust floor.
 

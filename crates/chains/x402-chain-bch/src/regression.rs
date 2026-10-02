@@ -519,6 +519,46 @@ fn fungible_token_json_omits_nft_and_accepts_typescript_shape() {
 }
 
 #[test]
+fn cashtoken_extra_uses_value_and_accepts_token_output_value() {
+    let extra = BchExtra {
+        asset_transfer_method: "cashtoken".to_string(),
+        payment_flow: "upfront".to_string(),
+        token_output_value: Some("1000".to_string()),
+        token: None,
+    };
+    let encoded = serde_json::to_value(&extra).unwrap();
+    assert_eq!(encoded["value"], "1000");
+    assert!(encoded.get("tokenOutputValue").is_none());
+
+    let from_value: BchExtra = serde_json::from_value(json!({
+        "assetTransferMethod": "cashtoken",
+        "paymentFlow": "upfront",
+        "value": "1035"
+    }))
+    .unwrap();
+    assert_eq!(from_value.token_output_value.as_deref(), Some("1035"));
+
+    let from_alias: BchExtra = serde_json::from_value(json!({
+        "assetTransferMethod": "cashtoken",
+        "paymentFlow": "upfront",
+        "tokenOutputValue": "1000"
+    }))
+    .unwrap();
+    assert_eq!(from_alias.token_output_value.as_deref(), Some("1000"));
+
+    let wallet = BchTransactionRequest {
+        network: BchTransactionNetwork::Chipnet,
+        recipient: "bchtest:qqpg03w6u3rqnrv9xw3fhxxx58c42tzw45vzz3vz9f".to_string(),
+        amount: "1".to_string(),
+        token_output_value: Some("1000".to_string()),
+        token: None,
+    };
+    let wallet_json = serde_json::to_value(&wallet).unwrap();
+    assert_eq!(wallet_json["tokenOutputValue"], "1000");
+    assert!(wallet_json.get("value").is_none());
+}
+
+#[test]
 fn omitted_cashtoken_merchant_value_is_payable() {
     let tag = crate::v2_bch_exact::V2BchExact::cash_token_price_tag(
         TOKEN_P2SH32_PAY_TO,
@@ -527,7 +567,7 @@ fn omitted_cashtoken_merchant_value_is_payable() {
         None,
         BchChainReference::Mainnet,
     );
-    let advertised = tag.requirements.extra.as_ref().unwrap()["tokenOutputValue"]
+    let advertised = tag.requirements.extra.as_ref().unwrap()["value"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1458,7 +1498,7 @@ fn offline_nft_commitments_pay_every_supported_destination() {
                     BchChainReference::Mainnet,
                     BchPolicy::default(),
                 );
-                let advertised = tag.requirements.extra.as_ref().unwrap()["tokenOutputValue"]
+                let advertised = tag.requirements.extra.as_ref().unwrap()["value"]
                     .as_str()
                     .unwrap()
                     .to_string();

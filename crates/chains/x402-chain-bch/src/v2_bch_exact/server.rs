@@ -46,7 +46,7 @@ impl V2BchExact {
 
     /// Build a fungible CashToken price.
     ///
-    /// An omitted `token_output_value` advertises the size-aware default for
+    /// An omitted `extra.value` advertises the size-aware default for
     /// `pay_to` under [`BchPolicy::default`]: at least 1,000 satoshis, the
     /// policy dust threshold, and the output's standard relay dust. An
     /// explicit value is preserved, including a value that is too small to relay.

@@ -322,7 +322,7 @@ impl BchTransaction {
     }
 }
 
-/// Floor for a CashToken merchant output when the price omits `tokenOutputValue`.
+/// Floor for a CashToken merchant output when the price omits `value`.
 ///
 /// The omitted value is the greater of this floor, the configured policy dust
 /// threshold, and the standard relay dust of the merchant output. CHIP-2024-12
@@ -442,7 +442,7 @@ pub fn payment_target_with_nft(
     })
 }
 
-/// Satoshis to use when a CashToken price omits `tokenOutputValue`.
+/// Satoshis to use when a CashToken price omits `value`.
 ///
 /// Explicit quotes are not passed through this function. The result is at
 /// least [`CASHTOKEN_OUTPUT_DUST`] and at least the policy dust threshold,
@@ -1427,6 +1427,7 @@ mod tests {
             network: String,
             asset: String,
             amount: String,
+            #[serde(rename = "value")]
             token_output_value: String,
             pay_to: String,
             source_value: String,

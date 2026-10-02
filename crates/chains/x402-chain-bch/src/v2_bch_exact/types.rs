@@ -30,7 +30,17 @@ pub struct BchTransactionRequest {
 pub struct BchExtra {
     pub asset_transfer_method: String,
     pub payment_flow: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Satoshis on the CashToken merchant output.
+    ///
+    /// The x402 wire name is `value`, matching `@optnlabs/x402-bch`. A message
+    /// that still uses `tokenOutputValue` is accepted. The wallet request
+    /// keeps its own `tokenOutputValue` field.
+    #[serde(
+        default,
+        rename = "value",
+        alias = "tokenOutputValue",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub token_output_value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<BchTokenRequest>,

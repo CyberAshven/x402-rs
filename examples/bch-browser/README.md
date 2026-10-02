@@ -10,7 +10,7 @@ chipnet CashAddr for the same 20-byte hash used by the native tests. The
 transport returns one local UTXO and rejects every other method, including
 broadcast.
 
-An omitted CashToken `tokenOutputValue` uses the same size-aware default as
+An omitted CashToken `value` uses the same size-aware default as
 the native client: at least 1,000 satoshis, the policy dust threshold, and
 the output's standard relay dust. A 128-byte NFT commitment can require more
 than 1,000 satoshis. An explicit value is preserved. Native outputs keep the
