@@ -56,9 +56,12 @@ The wallet-facing request uses `mainnet` or `chipnet`. The x402 wire network
 identities remain `bch:bitcoincash` and `bch:bchtest`.
 
 `FulcrumProvider` implements the Electrum Cash JSON-RPC boundary used by
-Fulcrum. Applications may supply a TLS or WebSocket transport through the
-`FulcrumTransport` trait and should inject a shared `BchSettlementStore` for
-multi-process facilitator deployments.
+Fulcrum. The crate includes `FulcrumTcpTransport` for plain TCP and, with the
+`websocket` feature, `FulcrumWebSocketTransport` for `ws://` and `wss://`
+servers such as public Fulcrum endpoints on port 50004. Applications may also
+supply their own transport through the `FulcrumTransport` trait, and should
+inject a shared `BchSettlementStore` for multi-process facilitator
+deployments.
 
 The adapter accounts for Fulcrum's two amount encodings: verbose transaction
 outputs are BCH decimal values, while blockchain.scripthash.listunspent returns

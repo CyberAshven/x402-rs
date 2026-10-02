@@ -30,6 +30,9 @@ jobs:
       - name: Test BCH crate
         run: cargo test --locked -p x402-chain-bch --lib
 
+      - name: Test BCH crate with the WebSocket transport
+        run: cargo test --locked -p x402-chain-bch --lib --features websocket
+
       - name: Install Clang for the wasm32 libsecp256k1 build
         run: sudo apt-get update && sudo apt-get install -y clang
 

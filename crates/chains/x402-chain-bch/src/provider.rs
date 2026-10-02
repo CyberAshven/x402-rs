@@ -151,6 +151,108 @@ impl<T: FulcrumTransport> FulcrumTransport for FailoverFulcrumTransport<T> {
     }
 }
 
+/// The `result` of a JSON-RPC response, or its `error` as a provider error.
+#[cfg(not(target_arch = "wasm32"))]
+fn json_rpc_result(response: Value) -> Result<Value, BchProviderError> {
+    if let Some(error) = response.get("error") {
+        let code = error.get("code").and_then(Value::as_i64).unwrap_or(-1);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown Fulcrum error")
+            .to_string();
+        return Err(BchProviderError::Remote { code, message });
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| BchProviderError::InvalidResponse("missing JSON-RPC result".to_string()))
+}
+
+/// Fulcrum over WebSocket, `ws://` or `wss://`, as public Fulcrum servers offer
+/// it (usually port 50004). TLS uses rustls with the ring provider and the
+/// webpki root certificates. Requires the `websocket` feature; any other
+/// transport can still be supplied through [`FulcrumTransport`].
+#[cfg(all(feature = "websocket", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+pub struct FulcrumWebSocketTransport {
+    socket: Arc<
+        Mutex<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
+    >,
+    next_id: Arc<AtomicU64>,
+}
+
+#[cfg(all(feature = "websocket", not(target_arch = "wasm32")))]
+impl FulcrumWebSocketTransport {
+    pub async fn connect(url: &str) -> Result<Self, BchProviderError> {
+        let transport = |error: String| BchProviderError::Transport(error);
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| transport(error.to_string()))?
+        .with_root_certificates(rustls::RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        ))
+        .with_no_client_auth();
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(8 * 1024 * 1024));
+        let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+            url,
+            Some(config),
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls))),
+        )
+        .await
+        .map_err(|error| transport(error.to_string()))?;
+        Ok(Self {
+            socket: Arc::new(Mutex::new(socket)),
+            next_id: Arc::new(AtomicU64::new(1)),
+        })
+    }
+}
+
+#[cfg(all(feature = "websocket", not(target_arch = "wasm32")))]
+#[async_trait]
+impl FulcrumTransport for FulcrumWebSocketTransport {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        let mut socket = self.socket.lock().await;
+        socket
+            .send(Message::text(request.to_string()))
+            .await
+            .map_err(|error| BchProviderError::Transport(error.to_string()))?;
+        while let Some(message) = socket.next().await {
+            let text =
+                match message.map_err(|error| BchProviderError::Transport(error.to_string()))? {
+                    Message::Text(text) => text.to_string(),
+                    Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+            let response: Value = serde_json::from_str(&text)
+                .map_err(|error| BchProviderError::InvalidResponse(error.to_string()))?;
+            // Fulcrum sends subscription notifications on the same connection.
+            if response.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            return json_rpc_result(response);
+        }
+        Err(BchProviderError::Transport(
+            "Fulcrum WebSocket closed before the response".to_string(),
+        ))
+    }
+}
+
 /// A newline-delimited Electrum JSON-RPC connection.
 ///
 /// Browsers cannot open this socket. Wasm builds use a caller-supplied
@@ -226,18 +328,7 @@ impl FulcrumTransport for FulcrumTcpTransport {
             if response.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
-            if let Some(error) = response.get("error") {
-                let code = error.get("code").and_then(Value::as_i64).unwrap_or(-1);
-                let message = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown Fulcrum error")
-                    .to_string();
-                return Err(BchProviderError::Remote { code, message });
-            }
-            return response.get("result").cloned().ok_or_else(|| {
-                BchProviderError::InvalidResponse("missing JSON-RPC result".to_string())
-            });
+            return json_rpc_result(response);
         }
     }
 }
@@ -927,6 +1018,81 @@ mod tests {
     #[test]
     fn rejects_an_empty_failover_set() {
         assert!(FailoverFulcrumTransport::<TestTransport>::new(vec![]).is_err());
+    }
+
+    /// A Fulcrum notification before the response is skipped, and errors
+    /// come back as remote errors, as with the TCP transport.
+    #[cfg(feature = "websocket")]
+    #[test]
+    fn websocket_transport_matches_responses_by_id() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(text))) = socket.next().await {
+                    let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                    let notification = json!({
+                        "jsonrpc": "2.0",
+                        "method": "blockchain.headers.subscribe",
+                        "params": [{ "height": 1 }]
+                    });
+                    socket.send(Message::text(notification.to_string())).await.unwrap();
+                    let reply = if request["method"] == "blockchain.headers.get_tip" {
+                        json!({ "jsonrpc": "2.0", "id": request["id"], "result": { "height": 326044 } })
+                    } else {
+                        json!({ "jsonrpc": "2.0", "id": request["id"], "error": { "code": 1, "message": "No transaction matching the requested hash was found" } })
+                    };
+                    socket.send(Message::text(reply.to_string())).await.unwrap();
+                }
+            });
+            let transport = FulcrumWebSocketTransport::connect(&format!("ws://{address}"))
+                .await
+                .unwrap();
+            let tip = transport
+                .request("blockchain.headers.get_tip", json!([]))
+                .await
+                .unwrap();
+            assert_eq!(tip["height"], 326044);
+            let provider = FulcrumProvider::new(transport, BchChainReference::CHIPNET);
+            assert_eq!(
+                provider.transaction_status(&TxId([7; 32])).await,
+                Ok(BchTransactionStatus::NotFound)
+            );
+            server.abort();
+        });
+    }
+
+    #[cfg(feature = "websocket")]
+    #[test]
+    #[ignore = "requires BCH_FULCRUM_WSS_ENDPOINT for a live Chipnet provider"]
+    fn live_chipnet_fulcrum_websocket_smoke() {
+        let endpoint = std::env::var("BCH_FULCRUM_WSS_ENDPOINT")
+            .expect("BCH_FULCRUM_WSS_ENDPOINT must be set for the live smoke test");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let transport = FulcrumWebSocketTransport::connect(&endpoint).await.unwrap();
+            let provider = FulcrumProvider::new(transport, BchChainReference::CHIPNET);
+            let payment =
+                TxId::from_hex("449fc5076c65559e77df28a071e8bab6c6ae2954a2e10583dc6d0899f7df5e45")
+                    .unwrap();
+            assert!(provider.tip_height().await.unwrap() > 0);
+            assert!(matches!(
+                provider.transaction_status(&payment).await.unwrap(),
+                BchTransactionStatus::Confirmed { height } if height > 0
+            ));
+        });
     }
 
     #[test]
