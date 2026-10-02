@@ -1889,3 +1889,398 @@ fn capability_name(capability: BchTokenCapability) -> &'static str {
         BchTokenCapability::Minting => "minting",
     }
 }
+
+const OTHER_CATEGORY: [u8; 32] = [0x44; 32];
+
+fn second_payer() -> Secp256k1BchSigner {
+    Secp256k1BchSigner::from_mnemonic_with_path(MNEMONIC, None, 145, 0, 0, 1).unwrap()
+}
+
+fn token_of(category: [u8; 32], amount: u64, nft: Option<(BchTokenCapability, &[u8])>) -> BchToken {
+    BchToken {
+        category,
+        amount,
+        nft: nft.map(|(capability, commitment)| BchNft {
+            capability,
+            commitment: commitment.to_vec(),
+        }),
+    }
+}
+
+fn owned_utxo(marker: u8, value: u64, script: Vec<u8>, token: Option<BchToken>) -> BchUtxo {
+    BchUtxo {
+        outpoint: OutPoint {
+            txid: TxId([marker; 32]),
+            vout: 0,
+        },
+        source_output: SourceOutput {
+            value,
+            script_pubkey: script,
+            token,
+        },
+        height: Some(10),
+    }
+}
+
+fn output(value: u64, script: Vec<u8>, token: Option<BchToken>) -> TxOutput {
+    TxOutput {
+        value,
+        script_pubkey: script,
+        token,
+    }
+}
+
+/// Spend `utxos` into `outputs`, signing each input with its owner's key.
+fn wallet_transaction(
+    utxos: &[BchUtxo],
+    signers: &[&Secp256k1BchSigner],
+    outputs: Vec<TxOutput>,
+) -> BchTransaction {
+    let mut transaction = BchTransaction {
+        version: 2,
+        inputs: utxos
+            .iter()
+            .map(|utxo| TxInput {
+                outpoint: utxo.outpoint,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            })
+            .collect(),
+        outputs,
+        lock_time: 0,
+    };
+    for (index, (utxo, signer)) in utxos.iter().zip(signers).enumerate() {
+        let digest = transaction
+            .signing_hash(
+                index,
+                &utxo.source_output,
+                crate::transaction::BCH_SIGHASH_ALL_FORKID,
+            )
+            .unwrap();
+        let mut signature = signer.sign_digest(digest).unwrap();
+        signature.push(crate::transaction::BCH_SIGHASH_ALL_FORKID as u8);
+        let mut script_sig = push_data(&signature).unwrap();
+        script_sig.extend_from_slice(&push_data(&signer.public_key()).unwrap());
+        transaction.inputs[index].script_sig = script_sig;
+    }
+    transaction
+}
+
+/// Transactions a third-party wallet may build. The TypeScript package checks
+/// the same cases in test/rust-parity.test.ts and must reach the same verdict.
+///
+/// Extra outputs, OP_RETURN data, a second payer, and unrelated CashTokens are
+/// accepted when every token is conserved. Burning, minting, changing an NFT,
+/// a second output to the merchant, dust, and more than 16 outputs are not.
+#[test]
+fn wallet_shapes_follow_the_typescript_rules() {
+    let payer = signer();
+    let other = second_payer();
+    let payer_lock = payer_script();
+    let other_lock = p2pkh_script(&hash160(&other.public_key()));
+    let native_merchant = CashAddr::decode_script(NATIVE_PAY_TO, BchChainReference::Mainnet)
+        .unwrap()
+        .locking_script();
+    let token_merchant = CashAddr::decode_script(TOKEN_P2SH32_PAY_TO, BchChainReference::Mainnet)
+        .unwrap()
+        .locking_script();
+    let native = native_requirements(NATIVE_PAY_TO, "1000");
+    let fungible = token_requirements(TOKEN_P2SH32_PAY_TO, "4", None);
+    let nft_commitment = [0xaa; 40];
+    let nft = token_requirements(
+        TOKEN_P2SH32_PAY_TO,
+        "0",
+        Some(BchNftRequest {
+            capability: "none".to_string(),
+            commitment: hex::encode(nft_commitment),
+        }),
+    );
+    let bch = |marker, value| owned_utxo(marker, value, payer_lock.clone(), None);
+    let spare_nft = token_of(CATEGORY, 0, Some((BchTokenCapability::Mutable, &[0xbb; 8])));
+    let paid_nft = token_of(
+        CATEGORY,
+        0,
+        Some((BchTokenCapability::None, &nft_commitment)),
+    );
+
+    let mut cases: Vec<(
+        &str,
+        &str,
+        PaymentRequirements,
+        Vec<BchUtxo>,
+        BchTransaction,
+    )> = Vec::new();
+    let mut add = |id,
+                   expect,
+                   requirements: &PaymentRequirements,
+                   utxos: Vec<BchUtxo>,
+                   signers: Vec<&Secp256k1BchSigner>,
+                   outputs| {
+        let transaction = wallet_transaction(&utxos, &signers, outputs);
+        cases.push((id, expect, requirements.clone(), utxos, transaction));
+    };
+
+    add(
+        "external-native-op-return",
+        "ok",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(0, vec![0x6a, 0x04, b'm', b'e', b'm', b'o'], None),
+            output(97_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-native-two-change-outputs",
+        "ok",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(50_000, payer_lock.clone(), None),
+            output(47_000, other_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-native-p2sh32-output",
+        "ok",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(5_000, p2sh32_script(&[0x55; 32]), None),
+            output(92_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-native-returns-unrelated-token",
+        "ok",
+        &native,
+        vec![
+            bch(1, 100_000),
+            owned_utxo(
+                2,
+                2_000,
+                payer_lock.clone(),
+                Some(token_of(OTHER_CATEGORY, 7, None)),
+            ),
+        ],
+        vec![&payer, &payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(
+                1_000,
+                payer_lock.clone(),
+                Some(token_of(OTHER_CATEGORY, 7, None)),
+            ),
+            output(98_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-native-two-payers",
+        "ok",
+        &native,
+        vec![
+            bch(1, 60_000),
+            owned_utxo(2, 50_000, other_lock.clone(), None),
+        ],
+        vec![&payer, &other],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(107_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-cashtoken-returns-unrelated-token",
+        "ok",
+        &fungible,
+        vec![
+            owned_utxo(
+                1,
+                100_000,
+                payer_lock.clone(),
+                Some(token_of(CATEGORY, 10, None)),
+            ),
+            owned_utxo(
+                2,
+                2_000,
+                payer_lock.clone(),
+                Some(token_of(OTHER_CATEGORY, 3, None)),
+            ),
+        ],
+        vec![&payer, &payer],
+        vec![
+            output(
+                1_000,
+                token_merchant.clone(),
+                Some(token_of(CATEGORY, 4, None)),
+            ),
+            output(1_000, payer_lock.clone(), Some(token_of(CATEGORY, 6, None))),
+            output(
+                1_000,
+                payer_lock.clone(),
+                Some(token_of(OTHER_CATEGORY, 3, None)),
+            ),
+            output(97_500, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-nft-returns-second-nft",
+        "ok",
+        &nft,
+        vec![
+            owned_utxo(1, 100_000, payer_lock.clone(), Some(paid_nft.clone())),
+            owned_utxo(2, 2_000, payer_lock.clone(), Some(spare_nft.clone())),
+        ],
+        vec![&payer, &payer],
+        vec![
+            output(1_000, token_merchant.clone(), Some(paid_nft.clone())),
+            output(1_000, payer_lock.clone(), Some(spare_nft.clone())),
+            output(98_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-reject-burns-token",
+        "reject",
+        &native,
+        vec![
+            bch(1, 100_000),
+            owned_utxo(
+                2,
+                2_000,
+                payer_lock.clone(),
+                Some(token_of(OTHER_CATEGORY, 7, None)),
+            ),
+        ],
+        vec![&payer, &payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(99_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-reject-mints-token",
+        "reject",
+        &fungible,
+        vec![owned_utxo(
+            1,
+            100_000,
+            payer_lock.clone(),
+            Some(token_of(CATEGORY, 4, None)),
+        )],
+        vec![&payer],
+        vec![
+            output(
+                1_000,
+                token_merchant.clone(),
+                Some(token_of(CATEGORY, 4, None)),
+            ),
+            output(1_000, payer_lock.clone(), Some(token_of(CATEGORY, 5, None))),
+            output(96_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-reject-changes-nft-capability",
+        "reject",
+        &nft,
+        vec![
+            owned_utxo(1, 100_000, payer_lock.clone(), Some(paid_nft.clone())),
+            owned_utxo(2, 2_000, payer_lock.clone(), Some(spare_nft.clone())),
+        ],
+        vec![&payer, &payer],
+        vec![
+            output(1_000, token_merchant.clone(), Some(paid_nft.clone())),
+            output(
+                1_000,
+                payer_lock.clone(),
+                Some(token_of(
+                    CATEGORY,
+                    0,
+                    Some((BchTokenCapability::None, &[0xbb; 8])),
+                )),
+            ),
+            output(98_000, payer_lock.clone(), None),
+        ],
+    );
+    let mut crowded = vec![output(1_000, native_merchant.clone(), None)];
+    crowded.extend((0..16).map(|_| output(1_000, payer_lock.clone(), None)));
+    add(
+        "external-reject-17-outputs",
+        "reject",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        crowded,
+    );
+    add(
+        "external-reject-second-merchant-output",
+        "reject",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(2_000, native_merchant.clone(), None),
+            output(95_000, payer_lock.clone(), None),
+        ],
+    );
+    add(
+        "external-reject-dust-output",
+        "reject",
+        &native,
+        vec![bch(1, 100_000)],
+        vec![&payer],
+        vec![
+            output(1_000, native_merchant.clone(), None),
+            output(500, other_lock.clone(), None),
+            output(96_500, payer_lock.clone(), None),
+        ],
+    );
+
+    let mut vectors = Vec::new();
+    for (id, expect, requirements, utxos, transaction) in cases {
+        let payload = PaymentPayload {
+            accepted: requirements.clone(),
+            payload: ExactBchPayload {
+                transaction: Base64Bytes::encode(transaction.serialize()).to_string(),
+            },
+            resource: None,
+            x402_version: X402Version2,
+            extensions: ExtensionsJson::default(),
+        };
+        let verdict = block_on(
+            facilitator(
+                FakeProvider::new(utxos.clone()),
+                BchConfirmationStrategy::Mempool,
+            )
+            .verify(&proto_request(&payload, &requirements)),
+        );
+        assert_eq!(verdict.is_ok(), expect == "ok", "{id}: {verdict:?}");
+        vectors.push(browser_case(
+            id,
+            "external",
+            expect,
+            &requirements,
+            &utxos,
+            Some(hex::encode(transaction.serialize())),
+        ));
+    }
+
+    let document = json!({ "offline": true, "resource": RESOURCE, "cases": vectors });
+    if let Ok(path) = std::env::var("BCH_WALLET_SHAPE_VECTORS") {
+        std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+    }
+    let committed: serde_json::Value = serde_json::from_str(include_str!(
+        "../test/fixtures/bch-exact-wallet-shape-vectors.json"
+    ))
+    .unwrap();
+    assert!(
+        document == committed,
+        "wallet shape vectors changed; regenerate test/fixtures/bch-exact-wallet-shape-vectors.json \
+         with BCH_WALLET_SHAPE_VECTORS and update the TypeScript copy"
+    );
+}

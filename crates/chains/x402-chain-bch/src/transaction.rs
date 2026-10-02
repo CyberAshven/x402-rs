@@ -2,6 +2,7 @@
 
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use crate::address::{CashAddr, hash160, p2pkh_script};
@@ -83,7 +84,7 @@ pub struct SourceOutput {
     pub token: Option<BchToken>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BchTokenCapability {
     None,
     Mutable,
@@ -347,6 +348,8 @@ pub struct BchPolicy {
     pub dust_threshold: u64,
     pub max_transaction_size: usize,
     pub max_inputs: usize,
+    /// Most outputs an exact payment may carry, including the merchant output.
+    pub max_outputs: usize,
 }
 
 impl Default for BchPolicy {
@@ -356,6 +359,7 @@ impl Default for BchPolicy {
             dust_threshold: 546,
             max_transaction_size: 100_000,
             max_inputs: 100,
+            max_outputs: 16,
         }
     }
 }
@@ -557,159 +561,87 @@ pub fn verify_payment(
             "source output count does not match transaction inputs".to_string(),
         ));
     }
-    if transaction.outputs.len() > 2 {
+    if transaction.outputs.is_empty() || transaction.outputs.len() > policy.max_outputs {
         return Err(TransactionError::PolicyViolation(
-            "BCH exact permits one merchant output and one change output".to_string(),
+            "transaction output count exceeds BCH payment policy".to_string(),
         ));
     }
 
     let mut input_value = 0u64;
-    let mut input_token_amount = 0u64;
-    let mut input_nft: Option<BchNft> = None;
+    let mut input_tokens = TokenLedger::default();
     let mut payer_hash = None;
     for (index, source_output) in source_outputs.iter().enumerate() {
         input_value = input_value
             .checked_add(source_output.value)
             .ok_or(TransactionError::ArithmeticOverflow)?;
+        // There is no BCH script VM here, so every input must be a P2PKH spend
+        // whose signature can be checked directly.
         let hash = transaction.verify_p2pkh_input(index, source_output)?;
-        if let Some(existing) = payer_hash {
-            if existing != hash {
-                return Err(TransactionError::PolicyViolation(
-                    "all BCH inputs must belong to the same payer".to_string(),
-                ));
-            }
-        } else {
-            payer_hash = Some(hash);
-        }
-        match target {
-            BchPaymentTarget::Native { .. } => {
-                if source_output.token.is_some() {
-                    return Err(TransactionError::PolicyViolation(
-                        "native BCH payment cannot spend CashTokens".to_string(),
-                    ));
-                }
-            }
-            BchPaymentTarget::CashToken { category, nft, .. } => {
-                if let Some(token) = &source_output.token {
-                    if &token.category != category
-                        || (nft.is_none() && token.nft.is_some())
-                        || (nft.is_some()
-                            && token
-                                .nft
-                                .as_ref()
-                                .is_some_and(|actual| Some(actual) != nft.as_ref()))
-                    {
-                        return Err(TransactionError::PolicyViolation(
-                            "CashToken input does not match the requested category or NFT"
-                                .to_string(),
-                        ));
-                    }
-                    if token.nft.is_some() {
-                        if input_nft.is_some() {
-                            return Err(TransactionError::PolicyViolation(
-                                "multiple NFT inputs are not supported".to_string(),
-                            ));
-                        }
-                        input_nft = token.nft.clone();
-                    }
-                    input_token_amount = input_token_amount
-                        .checked_add(token.amount)
-                        .ok_or(TransactionError::ArithmeticOverflow)?;
-                }
-            }
+        payer_hash.get_or_insert(hash);
+        if let Some(token) = &source_output.token {
+            input_tokens.add(token);
         }
     }
 
-    let requested_token_amount = match target {
-        BchPaymentTarget::Native { .. } => 0,
-        BchPaymentTarget::CashToken { amount, .. } => {
-            if input_token_amount < *amount {
-                return Err(TransactionError::PolicyViolation(
-                    "CashToken inputs do not cover the requested amount".to_string(),
-                ));
-            }
-            *amount
-        }
-    };
     if let BchPaymentTarget::CashToken {
-        nft: Some(expected),
+        category,
+        amount,
+        nft,
         ..
     } = target
-        && input_nft.as_ref() != Some(expected)
     {
-        return Err(TransactionError::PolicyViolation(
-            "CashToken inputs do not contain the requested NFT".to_string(),
-        ));
+        if nft
+            .as_ref()
+            .is_some_and(|expected| !input_tokens.contains_nft(category, expected))
+        {
+            return Err(TransactionError::PolicyViolation(
+                "CashToken inputs do not contain the requested NFT".to_string(),
+            ));
+        }
+        if input_tokens.fungible_amount(category) < u128::from(*amount) {
+            return Err(TransactionError::PolicyViolation(
+                "CashToken inputs do not cover the requested amount".to_string(),
+            ));
+        }
     }
 
-    let merchant_matches = transaction
+    let is_merchant_output = |output: &TxOutput| {
+        output.value == merchant_value
+            && output.script_pubkey == merchant_script
+            && merchant_token_matches(output.token.as_ref(), target)
+    };
+    if transaction
         .outputs
         .iter()
-        .filter(|output| {
-            output.value == merchant_value
-                && output.script_pubkey == merchant_script
-                && merchant_token_matches(output.token.as_ref(), target)
-        })
-        .count();
-    if merchant_matches != 1 {
+        .filter(|output| is_merchant_output(output))
+        .count()
+        != 1
+    {
         return Err(TransactionError::PolicyViolation(
             "transaction must contain exactly one exact merchant output".to_string(),
         ));
     }
 
     let mut output_value = 0u64;
-    let mut output_token_amount = 0u64;
+    let mut output_tokens = TokenLedger::default();
     for output in &transaction.outputs {
-        let is_merchant = output.value == merchant_value && output.script_pubkey == merchant_script;
-        if !is_merchant && !is_p2pkh_script(&output.script_pubkey) {
-            return Err(TransactionError::PolicyViolation(
-                "BCH exact change outputs must be standard P2PKH".to_string(),
-            ));
+        if let Some(token) = &output.token {
+            output_tokens.add(token);
         }
-        let minimum_output = standard_output_dust(output, policy.dust_threshold)?;
-        if output.value < minimum_output {
+        if !is_op_return_script(&output.script_pubkey)
+            && output.value < standard_output_dust(output, policy.dust_threshold)?
+        {
             return Err(TransactionError::PolicyViolation(
                 "output is below the standard BCH dust threshold".to_string(),
             ));
-        }
-        if let Some(token) = &output.token {
-            match target {
-                BchPaymentTarget::Native { .. } => {
-                    return Err(TransactionError::PolicyViolation(
-                        "native BCH payment cannot create CashTokens".to_string(),
-                    ));
-                }
-                BchPaymentTarget::CashToken { category, nft, .. }
-                    if &token.category != category
-                        || (nft.is_none() && token.nft.is_some())
-                        || (nft.is_some()
-                            && token
-                                .nft
-                                .as_ref()
-                                .is_some_and(|actual| Some(actual) != nft.as_ref())) =>
-                {
-                    return Err(TransactionError::PolicyViolation(
-                        "CashToken output category does not match the payment".to_string(),
-                    ));
-                }
-                BchPaymentTarget::CashToken { .. } => {}
-            }
-            output_token_amount = output_token_amount
-                .checked_add(token.amount)
-                .ok_or(TransactionError::ArithmeticOverflow)?;
         }
         output_value = output_value
             .checked_add(output.value)
             .ok_or(TransactionError::ArithmeticOverflow)?;
     }
-    if output_token_amount != input_token_amount {
+    if input_tokens != output_tokens {
         return Err(TransactionError::PolicyViolation(
-            "CashToken amount is not conserved".to_string(),
-        ));
-    }
-    if matches!(target, BchPaymentTarget::Native { .. }) && output_token_amount != 0 {
-        return Err(TransactionError::PolicyViolation(
-            "native BCH payment cannot contain CashTokens".to_string(),
+            "CashToken state is not conserved".to_string(),
         ));
     }
     let fee = input_value
@@ -725,62 +657,13 @@ pub fn verify_payment(
             "transaction fee is below the BCH exact minimum".to_string(),
         ));
     }
-    if transaction.outputs.len() == 2 {
-        let change = transaction
-            .outputs
-            .iter()
-            .find(|output| {
-                !(output.value == merchant_value && output.script_pubkey == merchant_script)
-            })
-            .ok_or_else(|| {
-                TransactionError::PolicyViolation("missing change output".to_string())
-            })?;
-        if change.value < policy.dust_threshold {
-            return Err(TransactionError::PolicyViolation(
-                "change output is below dust threshold".to_string(),
-            ));
-        }
-        if change.script_pubkey == merchant_script {
-            return Err(TransactionError::PolicyViolation(
-                "duplicate merchant output is not valid change".to_string(),
-            ));
-        }
-        if !payer_hash
-            .map(|hash| change.script_pubkey == p2pkh_script(&hash))
-            .unwrap_or(false)
-        {
-            return Err(TransactionError::PolicyViolation(
-                "change output must return to the payer".to_string(),
-            ));
-        }
-        match target {
-            BchPaymentTarget::Native { .. } => {
-                if change.token.is_some() {
-                    return Err(TransactionError::PolicyViolation(
-                        "native BCH change cannot contain CashTokens".to_string(),
-                    ));
-                }
-            }
-            BchPaymentTarget::CashToken { category, .. } => {
-                let expected_change = input_token_amount - requested_token_amount;
-                match (expected_change, &change.token) {
-                    (0, None) => {}
-                    (amount, Some(token))
-                        if amount == token.amount
-                            && token.category == *category
-                            && token.nft.is_none() => {}
-                    _ => {
-                        return Err(TransactionError::PolicyViolation(
-                            "CashToken change does not return the exact remainder to the payer"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-    } else if requested_token_amount != input_token_amount {
+    if transaction
+        .outputs
+        .iter()
+        .any(|output| output.script_pubkey == merchant_script && !is_merchant_output(output))
+    {
         return Err(TransactionError::PolicyViolation(
-            "CashToken remainder is missing".to_string(),
+            "duplicate merchant output".to_string(),
         ));
     }
 
@@ -806,6 +689,39 @@ fn validate_payment_target(target: &BchPaymentTarget) -> Result<(), TransactionE
         ));
     }
     Ok(())
+}
+
+/// CashToken state held by a set of outputs: the fungible amount of each
+/// category and the multiset of NFTs. An exact payment must leave it unchanged.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TokenLedger {
+    fungible: BTreeMap<[u8; 32], u128>,
+    nfts: BTreeMap<([u8; 32], BchTokenCapability, Vec<u8>), usize>,
+}
+
+impl TokenLedger {
+    fn add(&mut self, token: &BchToken) {
+        *self.fungible.entry(token.category).or_default() += u128::from(token.amount);
+        if let Some(nft) = &token.nft {
+            *self
+                .nfts
+                .entry((token.category, nft.capability, nft.commitment.clone()))
+                .or_default() += 1;
+        }
+    }
+
+    fn fungible_amount(&self, category: &[u8; 32]) -> u128 {
+        self.fungible.get(category).copied().unwrap_or_default()
+    }
+
+    fn contains_nft(&self, category: &[u8; 32], nft: &BchNft) -> bool {
+        self.nfts
+            .contains_key(&(*category, nft.capability, nft.commitment.clone()))
+    }
+}
+
+fn is_op_return_script(script: &[u8]) -> bool {
+    script.first() == Some(&0x6a)
 }
 
 fn merchant_token_matches(token: Option<&BchToken>, target: &BchPaymentTarget) -> bool {

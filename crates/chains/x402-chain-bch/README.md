@@ -26,6 +26,16 @@ finalized raw transaction. The facilitator must not append inputs or mutate a
 signed transaction. BCH amounts are satoshis; token amounts are atomic units.
 Both are conserved independently.
 
+The facilitator requires exactly one output that matches the merchant script,
+value, and token state, and no second output to the merchant script. A wallet
+may add other outputs up to `BchPolicy::max_outputs` (16 by default), including
+OP_RETURN data, and may spend inputs from more than one P2PKH key. Every
+CashToken category and NFT must leave the transaction unchanged, so minting,
+burning, and NFT capability changes are rejected. These are the same rules as
+`@optnlabs/x402-bch`, with one difference: inputs must be P2PKH. This crate has
+no BCH script VM, so it cannot validate P2SH inputs the way the TypeScript
+package does with Libauth.
+
 The wallet-facing request uses `mainnet` or `chipnet`. The x402 wire network
 identities remain `bch:bitcoincash` and `bch:bchtest`.
 
@@ -43,6 +53,10 @@ deterministic native-BCH P2PKH payment fixture shared with the TypeScript
 package [`@optnlabs/x402-bch`](https://www.npmjs.com/package/@optnlabs/x402-bch).
 It covers the serialized transaction, source output, merchant amount, payer,
 transaction ID, and fee so integrations can compare results across both SDKs.
+`test/fixtures/bch-exact-offline-vectors.json` and
+`test/fixtures/bch-exact-wallet-shape-vectors.json` are written by this crate's
+tests and checked by the TypeScript package. The tests fail if the generated
+vectors stop matching the committed copies.
 
 ## Related packages and pull requests
 
