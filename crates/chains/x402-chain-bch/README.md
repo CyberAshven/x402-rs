@@ -118,6 +118,13 @@ client-supplied source data cannot replace that lookup. A transport failure
 after broadcast is indeterminate and must be reconciled by TXID. It must not
 be treated as permission to build a second spend.
 
+`BchFacilitatorConfig::settlement_strategy` defaults to one confirmation.
+x402-axum settles the `upfront` flow before the handler runs, so a server
+answers within the request only with `Mempool` or `NoDoubleSpendProof`. With a
+confirmation count, settlement returns `settlement_pending:<txid>` until the
+transaction confirms, and retrying the same payment does not broadcast it
+again.
+
 ## CashTokens and P2SH32
 
 Native requirements use `asset: "BCH"` and
