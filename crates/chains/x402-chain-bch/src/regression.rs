@@ -1772,15 +1772,25 @@ fn offline_nft_commitments_pay_every_supported_destination() {
         None,
     ));
 
+    let document = json!({
+        "offline": true,
+        "mnemonic": MNEMONIC,
+        "resource": RESOURCE,
+        "cases": browser_cases,
+    });
     if let Ok(path) = std::env::var("BCH_BROWSER_VECTORS") {
-        let document = json!({
-            "offline": true,
-            "mnemonic": MNEMONIC,
-            "resource": RESOURCE,
-            "cases": browser_cases,
-        });
         std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
     }
+    // The TypeScript package checks the same vectors in test/rust-parity.test.ts.
+    let committed: serde_json::Value = serde_json::from_str(include_str!(
+        "../test/fixtures/bch-exact-offline-vectors.json"
+    ))
+    .unwrap();
+    assert!(
+        document == committed,
+        "offline vectors changed; regenerate test/fixtures/bch-exact-offline-vectors.json \
+         with BCH_BROWSER_VECTORS and update the TypeScript copy"
+    );
 }
 
 fn browser_case(
