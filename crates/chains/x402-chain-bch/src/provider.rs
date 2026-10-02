@@ -436,7 +436,7 @@ impl<T: FulcrumTransport> BchChainProvider for FulcrumProvider<T> {
                     Ok(BchTransactionStatus::NotFound)
                 }
             }
-            Err(BchProviderError::Remote { code: -5, .. }) => Ok(BchTransactionStatus::NotFound),
+            Err(error) if is_missing_transaction(&error) => Ok(BchTransactionStatus::NotFound),
             Err(error) => Err(error),
         }
     }
@@ -655,10 +655,76 @@ pub(crate) fn parse_token_amount(value: &Value) -> Result<u64, BchProviderError>
     Ok(amount)
 }
 
+/// Whether a server error means it does not know the transaction.
+///
+/// Fulcrum answers code 1, "No transaction matching the requested hash was
+/// found". bitcoind-style servers answer code -5. The message check matches the
+/// TypeScript provider.
+fn is_missing_transaction(error: &BchProviderError) -> bool {
+    match error {
+        BchProviderError::Remote { code: -5, .. } => true,
+        BchProviderError::Remote { message, .. } => {
+            let message = message.to_ascii_lowercase();
+            ["no transaction matching", "not found", "no such"]
+                .iter()
+                .any(|needle| message.contains(needle))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct RemoteErrorTransport(BchProviderError);
+
+    #[async_trait]
+    impl FulcrumTransport for RemoteErrorTransport {
+        async fn request(&self, _method: &str, _params: Value) -> Result<Value, BchProviderError> {
+            Err(self.0.clone())
+        }
+    }
+
+    /// A live Chipnet settlement broadcast successfully, then failed because
+    /// Fulcrum's code-1 "not found" answer for the new transaction was treated as
+    /// a provider error instead of a status.
+    #[test]
+    fn unknown_transaction_is_not_found() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let status = |error: BchProviderError| {
+            let provider =
+                FulcrumProvider::new(RemoteErrorTransport(error), BchChainReference::CHIPNET);
+            runtime.block_on(provider.transaction_status(&TxId([7; 32])))
+        };
+        for (code, message) in [
+            (1, "No transaction matching the requested hash was found"),
+            (-5, "No such mempool or blockchain transaction"),
+        ] {
+            let result = status(BchProviderError::Remote {
+                code,
+                message: message.to_string(),
+            });
+            assert_eq!(
+                result,
+                Ok(BchTransactionStatus::NotFound),
+                "{code}: {message}"
+            );
+        }
+        assert!(
+            status(BchProviderError::Remote {
+                code: 1,
+                message: "server busy".to_string(),
+            })
+            .is_err()
+        );
+        assert!(status(BchProviderError::Transport("offline".to_string())).is_err());
+    }
 
     #[derive(Clone)]
     struct TestTransport {
