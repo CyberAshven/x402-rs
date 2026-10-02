@@ -17,6 +17,10 @@ pub struct BchTransactionRequest {
     pub network: BchTransactionNetwork,
     pub recipient: String,
     pub amount: String,
+    /// Satoshis on the merchant output. CashToken requests include the quoted
+    /// value, or the size-aware default when the price omitted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_output_value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<BchTokenRequest>,
 }

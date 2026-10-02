@@ -165,6 +165,43 @@ impl CashAddrScript {
         })
     }
 
+    pub fn encode(&self) -> Result<String, CashAddrError> {
+        let version = match (self.kind, self.token_support) {
+            (CashAddrType::P2pkh, false) => 0u8,
+            (CashAddrType::P2sh20, false) => 8,
+            (CashAddrType::P2sh32, false) => 11,
+            (CashAddrType::P2pkh, true) => 16,
+            (CashAddrType::P2sh20, true) => 24,
+            (CashAddrType::P2sh32, true) => 27,
+        };
+        let expected = match self.kind {
+            CashAddrType::P2pkh | CashAddrType::P2sh20 => 20,
+            CashAddrType::P2sh32 => 32,
+        };
+        if self.payload.len() != expected {
+            return Err(CashAddrError::InvalidLength);
+        }
+        let prefix = match self.network {
+            BchChainReference::Mainnet => "bitcoincash",
+            BchChainReference::Chipnet => "bchtest",
+        };
+        let mut payload = Vec::with_capacity(1 + self.payload.len());
+        payload.push(version);
+        payload.extend_from_slice(&self.payload);
+        let data = convert_bits(&payload, 8, 5, true).ok_or(CashAddrError::InvalidPayload)?;
+        let mut checksum_input = prefix_expand(prefix);
+        checksum_input.extend_from_slice(&data);
+        checksum_input.extend_from_slice(&[0; 8]);
+        let checksum = create_checksum(&checksum_input);
+        let mut encoded = String::with_capacity(prefix.len() + 1 + data.len() + 8);
+        encoded.push_str(prefix);
+        encoded.push(':');
+        for value in data.into_iter().chain(checksum) {
+            encoded.push(CASHADDR_CHARSET[value as usize] as char);
+        }
+        Ok(encoded)
+    }
+
     pub fn locking_script(&self) -> Vec<u8> {
         match self.kind {
             CashAddrType::P2pkh => p2pkh_script(self.payload.as_slice().try_into().unwrap()),
@@ -318,5 +355,32 @@ mod tests {
         assert_eq!(token_p2sh32.kind, CashAddrType::P2sh32);
         assert!(token_p2sh32.token_support);
         assert_eq!(token_p2sh32.locking_script(), p2sh32_script(&[0x22; 32]));
+        assert_eq!(
+            token_p2sh32.encode().unwrap(),
+            "bitcoincash:rv3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyh0xp0zdk"
+        );
+
+        let token_p2pkh = CashAddrScript {
+            network: BchChainReference::Mainnet,
+            kind: CashAddrType::P2pkh,
+            payload: vec![0x11; 20],
+            token_support: true,
+        };
+        let encoded = token_p2pkh.encode().unwrap();
+        assert_eq!(
+            CashAddrScript::decode(&encoded, BchChainReference::Mainnet).unwrap(),
+            token_p2pkh
+        );
+        let token_p2sh20 = CashAddrScript {
+            network: BchChainReference::Chipnet,
+            kind: CashAddrType::P2sh20,
+            payload: vec![0x33; 20],
+            token_support: true,
+        };
+        let encoded = token_p2sh20.encode().unwrap();
+        assert_eq!(
+            CashAddrScript::decode(&encoded, BchChainReference::Chipnet).unwrap(),
+            token_p2sh20
+        );
     }
 }

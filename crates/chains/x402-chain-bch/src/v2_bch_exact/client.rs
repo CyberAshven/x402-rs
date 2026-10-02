@@ -242,6 +242,7 @@ fn transaction_request(
         },
         recipient: requirements.pay_to.clone(),
         amount: requirements.amount.clone(),
+        token_output_value: requirements.extra.token_output_value.clone(),
         token,
     })
 }
@@ -368,6 +369,8 @@ where
                 {
                     return None;
                 }
+                let pay_to = CashAddr::decode_script(&requirements.pay_to, network).ok()?;
+                let merchant_script = pay_to.locking_script();
                 let target = payment_target_with_nft(
                     &requirements.asset,
                     &requirements.amount,
@@ -379,10 +382,10 @@ where
                         &requirements.amount,
                     )
                     .ok()?,
+                    &merchant_script,
                     self.policy,
                 )
                 .ok()?;
-                let pay_to = CashAddr::decode_script(&requirements.pay_to, network).ok()?;
                 if matches!(&target, BchPaymentTarget::CashToken { .. }) && !pay_to.token_support {
                     return None;
                 }
@@ -473,6 +476,8 @@ where
                 {
                     return None;
                 }
+                let pay_to = CashAddr::decode_script(&requirements.pay_to, network).ok()?;
+                let merchant_script = pay_to.locking_script();
                 let target = payment_target_with_nft(
                     &requirements.asset,
                     &requirements.amount,
@@ -484,10 +489,10 @@ where
                         &requirements.amount,
                     )
                     .ok()?,
+                    &merchant_script,
                     self.policy,
                 )
                 .ok()?;
-                let pay_to = CashAddr::decode_script(&requirements.pay_to, network).ok()?;
                 if matches!(&target, BchPaymentTarget::CashToken { .. }) && !pay_to.token_support {
                     return None;
                 }
@@ -534,18 +539,12 @@ where
     P: BchChainProvider + Sync + 'static,
 {
     async fn sign_payment(&self) -> Result<String, X402Error> {
-        let request = transaction_request(&self.requirements)?;
-        let raw = self
-            .wallet
-            .create_payment(request)
-            .await
-            .map_err(X402Error::SigningError)?;
-        let transaction = BchTransaction::parse(&raw)
-            .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        let mut request = transaction_request(&self.requirements)?;
         let network = crate::BchChainReference::try_from(self.requirements.network.clone())
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let merchant = CashAddr::decode_script(&self.requirements.pay_to, network)
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        let merchant_script = merchant.locking_script();
         let nft = requested_nft(
             &self.requirements.extra,
             &self.requirements.asset,
@@ -558,9 +557,20 @@ where
             &self.requirements.extra.asset_transfer_method,
             self.requirements.extra.token_output_value.as_deref(),
             nft,
+            &merchant_script,
             self.policy,
         )
         .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        if request.token.is_some() && request.token_output_value.is_none() {
+            request.token_output_value = Some(target_merchant_value(&target).to_string());
+        }
+        let raw = self
+            .wallet
+            .create_payment(request)
+            .await
+            .map_err(X402Error::SigningError)?;
+        let transaction = BchTransaction::parse(&raw)
+            .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let mut sources = Vec::with_capacity(transaction.inputs.len());
         for input in &transaction.inputs {
             sources.push(
@@ -574,7 +584,7 @@ where
             &transaction,
             &sources,
             network,
-            &merchant.locking_script(),
+            &merchant_script,
             &target,
             self.policy,
         )
@@ -613,6 +623,7 @@ where
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let pay_to = CashAddr::decode_script(&self.requirements.pay_to, network)
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        let merchant_script = pay_to.locking_script();
         let target = payment_target_with_nft(
             &self.requirements.asset,
             &self.requirements.amount,
@@ -624,6 +635,7 @@ where
                 &self.requirements.amount,
             )
             .map_err(|error| X402Error::SigningError(error.to_string()))?,
+            &merchant_script,
             self.policy,
         )
         .map_err(|error| X402Error::SigningError(error.to_string()))?;

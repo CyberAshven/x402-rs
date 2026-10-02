@@ -401,6 +401,7 @@ where
         .map_err(|_| proto::PaymentVerificationError::UnsupportedChain)?;
     let pay_to = CashAddr::decode_script(&requirements.pay_to, network)
         .map_err(|error| proto::PaymentVerificationError::InvalidFormat(error.to_string()))?;
+    let merchant_script = pay_to.locking_script();
     let target = payment_target_with_nft(
         &requirements.asset,
         &requirements.amount,
@@ -412,6 +413,7 @@ where
             &requirements.amount,
         )
         .map_err(|error| proto::PaymentVerificationError::InvalidFormat(error.to_string()))?,
+        &merchant_script,
         policy,
     )
     .map_err(|error| proto::PaymentVerificationError::InvalidFormat(error.to_string()))?;
@@ -452,7 +454,7 @@ where
         &transaction,
         &source_outputs,
         network,
-        &pay_to.locking_script(),
+        &merchant_script,
         &target,
         policy,
     )

@@ -13,14 +13,16 @@ use x402_types::scheme::client::{X402Error, X402SchemeClient};
 use x402_types::util::Base64Bytes;
 
 use crate::BchChainReference;
-use crate::address::{CashAddr, hash160, p2pkh_script, p2sh20_script, p2sh32_script};
+use crate::address::{
+    CashAddr, CashAddrScript, CashAddrType, hash160, p2pkh_script, p2sh20_script, p2sh32_script,
+};
 use crate::provider::{
     BchChainProvider, BchOutpointStatus, BchProviderError, BchTransactionStatus, BchUtxo,
 };
 use crate::transaction::{
     BchNft, BchPaymentTarget, BchPolicy, BchToken, BchTokenCapability, BchTransaction, OutPoint,
-    SourceOutput, TxId, TxInput, TxOutput, is_p2sh20_script, is_p2sh32_script, payment_target,
-    payment_target_with_nft, push_data, verify_payment,
+    SourceOutput, TxId, TxInput, TxOutput, is_p2sh20_script, is_p2sh32_script,
+    omitted_token_output_value, payment_target, payment_target_with_nft, push_data, verify_payment,
 };
 use crate::v2_bch_exact::client::{
     BchSigner, BchWallet, Secp256k1BchSigner, V2BchExactClient, V2BchExactWalletClient,
@@ -53,7 +55,8 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 fn signer() -> Secp256k1BchSigner {
-    Secp256k1BchSigner::from_mnemonic(MNEMONIC, None).unwrap()
+    // Mainnet payments and the browser vectors use BIP44 coin type 145.
+    Secp256k1BchSigner::from_mnemonic_with_path(MNEMONIC, None, 145, 0, 0, 0).unwrap()
 }
 
 fn payer_script() -> Vec<u8> {
@@ -361,7 +364,12 @@ impl BchWallet for RecordingWallet {
         };
         let merchant = CashAddr::decode_script(&request.recipient, network)
             .map_err(|error| error.to_string())?;
+        let merchant_script = merchant.locking_script();
         let target = if let Some(token) = &request.token {
+            let quoted = request
+                .token_output_value
+                .as_deref()
+                .ok_or("CashToken wallet request is missing tokenOutputValue")?;
             let nft = crate::transaction::parse_cash_token_nft(
                 token.nft.as_ref().map(|nft| nft.capability.as_str()),
                 token.nft.as_ref().map(|nft| nft.commitment.as_str()),
@@ -371,8 +379,9 @@ impl BchWallet for RecordingWallet {
                 &token.category,
                 &token.amount,
                 "cashtoken",
-                Some("1000"),
+                Some(quoted),
                 nft,
+                &merchant_script,
                 BchPolicy::default(),
             )
             .map_err(|error| error.to_string())?
@@ -382,7 +391,7 @@ impl BchWallet for RecordingWallet {
         };
         let transaction = build_and_sign_transaction(
             &self.utxos,
-            merchant.locking_script(),
+            merchant_script,
             target,
             &signer(),
             network,
@@ -819,6 +828,7 @@ fn nft_mismatch(
             capability,
             commitment: commitment.to_vec(),
         }),
+        &merchant,
         BchPolicy::default(),
     )
     .unwrap();
@@ -872,6 +882,7 @@ fn rejects_token_conservation_failure() {
         "cashtoken",
         Some("2000"),
         None,
+        &merchant,
         BchPolicy::default(),
     )
     .unwrap();
@@ -959,6 +970,7 @@ fn rejects_cashtoken_output_below_standard_dust() {
         "cashtoken",
         Some("546"),
         None,
+        &merchant,
         BchPolicy::default(),
     )
     .unwrap();
@@ -1357,6 +1369,7 @@ fn payment_target_rejects_token_amount_above_i64() {
         "cashtoken",
         Some("546"),
         None,
+        &[],
         BchPolicy::default(),
     )
     .unwrap_err();
@@ -1366,4 +1379,463 @@ fn payment_target_rejects_token_amount_above_i64() {
     ));
     let _native: BchPaymentTarget =
         payment_target("BCH", "3000", "native", None, BchPolicy::default()).unwrap();
+}
+
+fn token_pay_to(kind: CashAddrType, payload: &[u8]) -> String {
+    CashAddrScript {
+        network: BchChainReference::Mainnet,
+        kind,
+        payload: payload.to_vec(),
+        token_support: true,
+    }
+    .encode()
+    .unwrap()
+}
+
+fn commitment_requirements(
+    pay_to: &str,
+    amount: &str,
+    commitment: &str,
+    token_output_value: Option<&str>,
+) -> PaymentRequirements {
+    let mut requirements = token_requirements(
+        pay_to,
+        amount,
+        Some(BchNftRequest {
+            capability: "none".to_string(),
+            commitment: commitment.to_string(),
+        }),
+    );
+    requirements.extra.token_output_value = token_output_value.map(str::to_string);
+    requirements
+}
+
+/// Offline payment matrix for the current 128-byte commitment rule.
+///
+/// These cases use the in-memory provider. They do not contact a live Fulcrum
+/// server; the ignored chipnet tests remain the live-network checks.
+#[test]
+fn offline_nft_commitments_pay_every_supported_destination() {
+    let destinations = [
+        ("p2pkh", token_pay_to(CashAddrType::P2pkh, &[0x11; 20])),
+        ("p2sh20", token_pay_to(CashAddrType::P2sh20, &[0x33; 20])),
+        ("p2sh32", token_pay_to(CashAddrType::P2sh32, &[0x22; 32])),
+    ];
+    let mut browser_cases = Vec::new();
+    for length in [0usize, 40, 41, 128] {
+        let commitment = vec![0x5a; length];
+        let commitment_hex = hex::encode(&commitment);
+        for (fungible_amount, shape) in [(0u64, "nft-only"), (2u64, "nft-fungible")] {
+            for (destination, pay_to) in &destinations {
+                let nft = BchNft {
+                    capability: BchTokenCapability::None,
+                    commitment: commitment.clone(),
+                };
+                let script = CashAddr::decode_script(pay_to, BchChainReference::Mainnet)
+                    .unwrap()
+                    .locking_script();
+                let expected = omitted_token_output_value(
+                    &script,
+                    CATEGORY,
+                    fungible_amount,
+                    Some(&nft),
+                    BchPolicy::default(),
+                )
+                .unwrap();
+                assert!(expected >= 1_000);
+                if length == 128 {
+                    assert!(
+                        expected > 1_000,
+                        "{destination} {shape} dust {expected} must exceed the 1,000-sat floor"
+                    );
+                }
+                let tag = crate::v2_bch_exact::V2BchExact::cash_token_nft_price_tag(
+                    pay_to,
+                    category_hex(),
+                    fungible_amount,
+                    Some(nft.clone()),
+                    None,
+                    BchChainReference::Mainnet,
+                    BchPolicy::default(),
+                );
+                let advertised = tag.requirements.extra.as_ref().unwrap()["tokenOutputValue"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert_eq!(advertised, expected.to_string());
+                let requirements = commitment_requirements(
+                    pay_to,
+                    &fungible_amount.to_string(),
+                    &commitment_hex,
+                    Some(&advertised),
+                );
+                let input_amount = if fungible_amount == 0 { 0 } else { 5 };
+                let utxos = vec![utxo(
+                    1,
+                    100_000,
+                    Some(nft_token(
+                        input_amount,
+                        BchTokenCapability::None,
+                        &commitment,
+                    )),
+                )];
+                let provider = FakeProvider::new(utxos.clone());
+                let payload = sign_with(provider.clone(), &requirements).unwrap_or_else(|error| {
+                    panic!("{destination} {shape} commitment {length} failed: {error}")
+                });
+                let transaction = decode_tx(&payload);
+                let merchant = transaction.outputs[0].token.as_ref().unwrap();
+                assert_eq!(transaction.outputs[0].value, expected);
+                assert_eq!(merchant.amount, fungible_amount);
+                assert_eq!(merchant.nft.as_ref().unwrap().commitment, commitment);
+                if fungible_amount == 0 {
+                    assert!(
+                        transaction
+                            .outputs
+                            .iter()
+                            .skip(1)
+                            .all(|output| output.token.is_none())
+                    );
+                } else {
+                    let change = transaction.outputs[1].token.as_ref().unwrap();
+                    assert_eq!(change.amount, input_amount - fungible_amount);
+                    assert!(change.nft.is_none(), "token change stays fungible");
+                }
+                block_on(
+                    facilitator(provider, BchConfirmationStrategy::Mempool)
+                        .verify(&proto_request(&payload, &requirements)),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{destination} {shape} commitment {length} did not verify: {error}")
+                });
+                let id = format!("mnemonic-{shape}-{destination}-{length}");
+                browser_cases.push(browser_case(
+                    &id,
+                    "mnemonic",
+                    "ok",
+                    &requirements,
+                    &utxos,
+                    Some(hex::encode(transaction.serialize())),
+                ));
+                if *destination == "p2pkh" {
+                    let (request, outcome) = wallet_outcome(
+                        FakeProvider::new(utxos.clone()),
+                        utxos.clone(),
+                        &requirements,
+                    );
+                    let wallet_tx = decode_tx(&outcome.expect("wallet payment"));
+                    assert_eq!(
+                        hex::encode(wallet_tx.serialize()),
+                        hex::encode(transaction.serialize())
+                    );
+                    assert_eq!(
+                        request.unwrap().token_output_value.as_deref(),
+                        Some(advertised.as_str())
+                    );
+                    browser_cases.push(browser_case(
+                        &format!("wallet-{shape}-{destination}-{length}"),
+                        "wallet",
+                        "ok",
+                        &requirements,
+                        &utxos,
+                        Some(hex::encode(wallet_tx.serialize())),
+                    ));
+                }
+            }
+        }
+    }
+
+    let long_pay_to = token_pay_to(CashAddrType::P2pkh, &[0x11; 20]);
+    let long_commitment = "ab".repeat(128);
+    let quoted = commitment_requirements(&long_pay_to, "0", &long_commitment, Some("1000"));
+    let quoted_utxos = vec![utxo(
+        1,
+        100_000,
+        Some(nft_token(0, BchTokenCapability::None, &[0xab; 128])),
+    )];
+    let quoted_merchant = CashAddr::decode_script(&long_pay_to, BchChainReference::Mainnet)
+        .unwrap()
+        .locking_script();
+    let quoted_target = payment_target_with_nft(
+        &category_hex(),
+        "0",
+        "cashtoken",
+        Some("1000"),
+        Some(BchNft {
+            capability: BchTokenCapability::None,
+            commitment: vec![0xab; 128],
+        }),
+        &quoted_merchant,
+        BchPolicy::default(),
+    )
+    .unwrap();
+    match &quoted_target {
+        BchPaymentTarget::CashToken { merchant_value, .. } => assert_eq!(*merchant_value, 1_000),
+        BchPaymentTarget::Native { .. } => panic!("expected a CashToken target"),
+    }
+    let builder_error = build_and_sign_transaction(
+        &quoted_utxos,
+        quoted_merchant,
+        quoted_target,
+        &signer(),
+        BchChainReference::Mainnet,
+        BchPolicy::default(),
+    )
+    .expect_err("explicit 1000 sats must stay below a 128-byte commitment's dust");
+    assert!(
+        format!("{builder_error:?}").contains("dust"),
+        "{builder_error:?}"
+    );
+    let quoted_error = sign_with(FakeProvider::new(quoted_utxos.clone()), &quoted)
+        .expect_err("the client must reject the quoted value instead of raising it");
+    assert!(
+        quoted_error.to_string().contains("policy"),
+        "{quoted_error}"
+    );
+    browser_cases.push(browser_case(
+        "mnemonic-explicit-1000-p2pkh-128",
+        "mnemonic",
+        "reject",
+        &quoted,
+        &quoted_utxos,
+        None,
+    ));
+
+    let mut omitted = commitment_requirements(&long_pay_to, "2", &long_commitment, None);
+    omitted.extra.token = Some(BchTokenRequest {
+        category: category_hex(),
+        amount: "2".to_string(),
+        nft: Some(BchNftRequest {
+            capability: "none".to_string(),
+            commitment: long_commitment.clone(),
+        }),
+    });
+    let policy = BchPolicy {
+        dust_threshold: 5_000,
+        ..BchPolicy::default()
+    };
+    let raised_utxos = vec![utxo(
+        1,
+        100_000,
+        Some(nft_token(5, BchTokenCapability::None, &[0xab; 128])),
+    )];
+    let client = V2BchExactClient::new(signer(), FakeProvider::new(raised_utxos.clone()))
+        .with_policy(policy);
+    let raised_payload = decode_payload(
+        &block_on(client.accept(&required(&omitted))[0].sign())
+            .expect("policy floor raises an omitted merchant value"),
+    );
+    assert!(decode_tx(&raised_payload).outputs[0].value >= 5_000);
+
+    let funding_commitment = vec![0x5a; 128];
+    let funding_hex = hex::encode(&funding_commitment);
+    let funding_pay_to = destinations[2].1.clone();
+    let funding_script = CashAddr::decode_script(&funding_pay_to, BchChainReference::Mainnet)
+        .unwrap()
+        .locking_script();
+    let funding_value = omitted_token_output_value(
+        &funding_script,
+        CATEGORY,
+        0,
+        Some(&BchNft {
+            capability: BchTokenCapability::None,
+            commitment: funding_commitment.clone(),
+        }),
+        BchPolicy::default(),
+    )
+    .unwrap();
+    let funding_requirements = commitment_requirements(
+        &funding_pay_to,
+        "0",
+        &funding_hex,
+        Some(&funding_value.to_string()),
+    );
+    let funding_utxos = vec![
+        utxo(
+            1,
+            funding_value,
+            Some(nft_token(0, BchTokenCapability::None, &funding_commitment)),
+        ),
+        utxo(2, 50_000, None),
+    ];
+    let funding_payload = sign_with(
+        FakeProvider::new(funding_utxos.clone()),
+        &funding_requirements,
+    )
+    .expect("128-byte NFT payment adds an ordinary BCH input");
+    let funding_tx = decode_tx(&funding_payload);
+    assert_eq!(funding_tx.inputs.len(), 2);
+    assert_eq!(funding_tx.inputs[1].outpoint.txid, TxId([2; 32]));
+    assert_eq!(
+        funding_tx.outputs[0]
+            .token
+            .as_ref()
+            .unwrap()
+            .nft
+            .as_ref()
+            .unwrap()
+            .commitment,
+        funding_commitment
+    );
+    assert!(
+        funding_tx
+            .outputs
+            .iter()
+            .skip(1)
+            .all(|output| output.token.is_none())
+    );
+    browser_cases.push(browser_case(
+        "mnemonic-nft-only-p2sh32-128-extra-bch",
+        "mnemonic",
+        "ok",
+        &funding_requirements,
+        &funding_utxos,
+        Some(hex::encode(funding_tx.serialize())),
+    ));
+    let (_, wallet_funding) = wallet_outcome(
+        FakeProvider::new(funding_utxos.clone()),
+        funding_utxos.clone(),
+        &funding_requirements,
+    );
+    let wallet_funding_tx = decode_tx(&wallet_funding.expect("wallet funding payment"));
+    assert_eq!(wallet_funding_tx.inputs.len(), 2);
+    browser_cases.push(browser_case(
+        "wallet-nft-only-p2sh32-128-extra-bch",
+        "wallet",
+        "ok",
+        &funding_requirements,
+        &funding_utxos,
+        Some(hex::encode(wallet_funding_tx.serialize())),
+    ));
+
+    let over_limit = commitment_requirements(&long_pay_to, "0", &"cd".repeat(129), Some("1000"));
+    let over_provider = FakeProvider::new(vec![utxo(1, 100_000, None)]);
+    let over_client = V2BchExactClient::new(signer(), over_provider);
+    assert!(
+        over_client.accept(&required(&over_limit)).is_empty(),
+        "a 129-byte commitment is not a current-rule payment"
+    );
+    browser_cases.push(browser_case(
+        "mnemonic-reject-129",
+        "mnemonic",
+        "reject",
+        &over_limit,
+        &[],
+        None,
+    ));
+    browser_cases.push(browser_case(
+        "wallet-reject-129",
+        "wallet",
+        "reject",
+        &over_limit,
+        &[],
+        None,
+    ));
+
+    if let Ok(path) = std::env::var("BCH_BROWSER_VECTORS") {
+        let document = json!({
+            "offline": true,
+            "mnemonic": MNEMONIC,
+            "resource": RESOURCE,
+            "cases": browser_cases,
+        });
+        std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+    }
+}
+
+fn browser_case(
+    id: &str,
+    mode: &str,
+    expect: &str,
+    requirements: &PaymentRequirements,
+    utxos: &[BchUtxo],
+    transaction_hex: Option<String>,
+) -> serde_json::Value {
+    let listunspent = utxos.iter().map(listunspent_entry).collect::<Vec<_>>();
+    let mut transactions = serde_json::Map::new();
+    for utxo in utxos {
+        transactions.insert(utxo.outpoint.txid.to_string(), previous_transaction(utxo));
+    }
+    json!({
+        "id": id,
+        "mode": mode,
+        "expect": expect,
+        "requirements": requirements,
+        "listunspent": listunspent,
+        "walletUtxos": utxos.iter().map(wallet_utxo_json).collect::<Vec<_>>(),
+        "transactions": transactions,
+        "transactionHex": transaction_hex,
+    })
+}
+
+fn listunspent_entry(utxo: &BchUtxo) -> serde_json::Value {
+    let mut entry = json!({
+        "tx_hash": utxo.outpoint.txid.to_string(),
+        "tx_pos": utxo.outpoint.vout,
+        "value": utxo.source_output.value,
+        "height": utxo.height.unwrap_or(10),
+    });
+    if let Some(token) = &utxo.source_output.token {
+        entry["token_data"] = fulcrum_token(token);
+    }
+    entry
+}
+
+fn previous_transaction(utxo: &BchUtxo) -> serde_json::Value {
+    let sats = utxo.source_output.value;
+    let mut output = json!({
+        "n": utxo.outpoint.vout,
+        "value": format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000),
+        "scriptPubKey": { "hex": hex::encode(&utxo.source_output.script_pubkey) },
+    });
+    if let Some(token) = &utxo.source_output.token {
+        output["tokenData"] = fulcrum_token(token);
+    }
+    json!({ "vout": [output] })
+}
+
+fn wallet_utxo_json(utxo: &BchUtxo) -> serde_json::Value {
+    json!({
+        "txid": utxo.outpoint.txid.to_string(),
+        "vout": utxo.outpoint.vout,
+        "value": utxo.source_output.value,
+        "script": hex::encode(&utxo.source_output.script_pubkey),
+        "token": utxo.source_output.token.as_ref().map(wallet_token),
+    })
+}
+
+fn fulcrum_token(token: &BchToken) -> serde_json::Value {
+    let mut value = json!({
+        "category": hex::encode(token.category),
+        "amount": token.amount.to_string(),
+    });
+    if let Some(nft) = &token.nft {
+        value["nft"] = json!({
+            "capability": capability_name(nft.capability),
+            "commitment": hex::encode(&nft.commitment),
+        });
+    }
+    value
+}
+
+fn wallet_token(token: &BchToken) -> serde_json::Value {
+    let mut value = json!({
+        "category": hex::encode(token.category),
+        "amount": token.amount.to_string(),
+    });
+    if let Some(nft) = &token.nft {
+        value["nft"] = json!({
+            "capability": capability_name(nft.capability),
+            "commitment": hex::encode(&nft.commitment),
+        });
+    }
+    value
+}
+
+fn capability_name(capability: BchTokenCapability) -> &'static str {
+    match capability {
+        BchTokenCapability::None => "none",
+        BchTokenCapability::Mutable => "mutable",
+        BchTokenCapability::Minting => "minting",
+    }
 }

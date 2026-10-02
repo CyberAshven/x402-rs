@@ -36,4 +36,4 @@ pub use transaction::{
 };
 pub use v2_bch_exact::{BchExtra, ExactBchPayload, V2BchExact, V2BchExactClient};
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{BchBrowserClient, JsFulcrumTransport};
+pub use wasm::{BchBrowserClient, BchBrowserWalletClient, JsFulcrumTransport};

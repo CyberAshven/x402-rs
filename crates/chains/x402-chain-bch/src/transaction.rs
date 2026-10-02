@@ -322,12 +322,24 @@ impl BchTransaction {
     }
 }
 
-/// Default BCH value of a CashToken merchant output when the price omits
-/// `tokenOutputValue`. Every supported CashToken locking script has a standard
-/// relay dust of at most 828 sats, so 1,000 sats clears that floor. Native
-/// outputs keep the 546-sat dust threshold. An explicit value is preserved
-/// and still has to meet the size-based dust check.
+/// Floor for a CashToken merchant output when the price omits `tokenOutputValue`.
+///
+/// The omitted value is the greater of this floor, the configured policy dust
+/// threshold, and the standard relay dust of the merchant output. CHIP-2024-12
+/// raised the consensus commitment limit from 40 bytes to 128 bytes
+/// (<https://github.com/bitjson/bch-p2s>), and a 128-byte commitment can push
+/// that relay dust above 1,000 satoshis. The historical 828-satoshi figure is
+/// the relay dust of a 40-byte commitment on the largest locking script this
+/// crate pays; it is not the current maximum. An explicit value is preserved
+/// and still has to meet the size-based dust check. Native outputs keep the
+/// 546-satoshi dust floor.
 pub(crate) const CASHTOKEN_OUTPUT_DUST: u64 = 1_000;
+
+/// Maximum NFT commitment length after the May 2026 upgrade.
+///
+/// An empty commitment is valid: the commitment bit stays unset. A commitment
+/// bit set to a compact-size length of zero is not a valid encoding.
+pub const MAX_TOKEN_COMMITMENT_LENGTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BchPolicy {
@@ -379,6 +391,7 @@ pub fn payment_target(
         asset_transfer_method,
         token_output_value,
         None,
+        &[],
         policy,
     )
 }
@@ -389,6 +402,7 @@ pub fn payment_target_with_nft(
     asset_transfer_method: &str,
     token_output_value: Option<&str>,
     nft: Option<BchNft>,
+    merchant_script: &[u8],
     policy: BchPolicy,
 ) -> Result<BchPaymentTarget, TransactionError> {
     let amount = parse_canonical_satoshi_amount(amount)?;
@@ -413,16 +427,54 @@ pub fn payment_target_with_nft(
             "CashToken amount is outside the BCH token range".to_string(),
         ));
     }
-    let merchant_value = token_output_value
-        .map(parse_canonical_satoshi_amount)
-        .transpose()?
-        .unwrap_or(policy.dust_threshold.max(CASHTOKEN_OUTPUT_DUST));
+    let category = parse_cash_token_category(asset)?;
+    let merchant_value = match token_output_value {
+        Some(value) => parse_canonical_satoshi_amount(value)?,
+        None => {
+            omitted_token_output_value(merchant_script, category, amount, nft.as_ref(), policy)?
+        }
+    };
     Ok(BchPaymentTarget::CashToken {
-        category: parse_cash_token_category(asset)?,
+        category,
         amount,
         merchant_value,
         nft,
     })
+}
+
+/// Satoshis to use when a CashToken price omits `tokenOutputValue`.
+///
+/// Explicit quotes are not passed through this function. The result is at
+/// least [`CASHTOKEN_OUTPUT_DUST`] and at least the policy dust threshold,
+/// and it is large enough for the standard relay dust of `locking_script`
+/// with this token prefix.
+pub(crate) fn omitted_token_output_value(
+    locking_script: &[u8],
+    category: [u8; 32],
+    amount: u64,
+    nft: Option<&BchNft>,
+    policy: BchPolicy,
+) -> Result<u64, TransactionError> {
+    if !is_supported_merchant_script(locking_script) {
+        return Err(TransactionError::PolicyViolation(
+            "omitted tokenOutputValue requires the merchant locking script".to_string(),
+        ));
+    }
+    if nft.is_some_and(|nft| nft.commitment.len() > MAX_TOKEN_COMMITMENT_LENGTH) {
+        return Err(TransactionError::PolicyViolation(
+            "invalid CashToken NFT commitment".to_string(),
+        ));
+    }
+    let output = TxOutput {
+        value: 0,
+        script_pubkey: locking_script.to_vec(),
+        token: Some(BchToken {
+            category,
+            amount,
+            nft: nft.cloned(),
+        }),
+    };
+    Ok(standard_output_dust(&output, policy.dust_threshold)?.max(CASHTOKEN_OUTPUT_DUST))
 }
 
 pub fn parse_cash_token_nft(
@@ -443,7 +495,7 @@ pub fn parse_cash_token_nft(
                 }
             };
             let commitment = hex::decode(commitment).map_err(|_| TransactionError::InvalidHex)?;
-            if commitment.is_empty() || commitment.len() > 40 {
+            if commitment.len() > MAX_TOKEN_COMMITMENT_LENGTH {
                 return Err(TransactionError::PolicyViolation(
                     "invalid CashToken NFT commitment".to_string(),
                 ));
@@ -822,7 +874,7 @@ fn parse_token_prefix_and_script(
     let mut offset = 34usize;
     let commitment = if has_commitment {
         let (length, next) = read_compact_uint(&field[offset..])?;
-        if length == 0 || length > 40 {
+        if length == 0 || length > MAX_TOKEN_COMMITMENT_LENGTH as u64 {
             return Err(TransactionError::InvalidScript);
         }
         offset = offset
@@ -896,7 +948,7 @@ fn serialize_token_prefix(token: Option<&BchToken>) -> Result<Vec<u8>, Transacti
         };
         bitfield |= 0x20;
         if !nft.commitment.is_empty() {
-            if nft.commitment.len() > 40 {
+            if nft.commitment.len() > MAX_TOKEN_COMMITMENT_LENGTH {
                 return Err(TransactionError::InvalidScript);
             }
             bitfield |= 0x40;
@@ -1566,5 +1618,117 @@ mod tests {
             matches!(error, TransactionError::ExcessiveCount),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn commitment_codec_accepts_zero_through_128_and_rejects_129() {
+        let script = p2pkh_script(&[0x11; 20]);
+        for length in [0usize, 40, 41, 128] {
+            let token = BchToken {
+                category: [0x11; 32],
+                amount: 0,
+                nft: Some(BchNft {
+                    capability: BchTokenCapability::None,
+                    commitment: vec![0xab; length],
+                }),
+            };
+            let field = serialize_token_prefix_and_script(Some(&token), &script).unwrap();
+            let (parsed, parsed_script) = parse_token_prefix_and_script(&field).unwrap();
+            assert_eq!(parsed, Some(token));
+            assert_eq!(parsed_script, script);
+        }
+
+        let too_long = BchToken {
+            category: [0x11; 32],
+            amount: 1,
+            nft: Some(BchNft {
+                capability: BchTokenCapability::Mutable,
+                commitment: vec![0xab; 129],
+            }),
+        };
+        assert!(serialize_token_prefix_and_script(Some(&too_long), &script).is_err());
+
+        let mut zero_length = vec![0xef];
+        zero_length.extend([0x11u8; 32]);
+        zero_length.push(0x60);
+        zero_length.push(0x00);
+        zero_length.extend_from_slice(&script);
+        assert!(parse_token_prefix_and_script(&zero_length).is_err());
+
+        let mut over_limit = vec![0xef];
+        over_limit.extend([0x11u8; 32]);
+        over_limit.push(0x60);
+        over_limit.push(129);
+        over_limit.extend(std::iter::repeat_n(0xab, 129));
+        over_limit.extend_from_slice(&script);
+        assert!(parse_token_prefix_and_script(&over_limit).is_err());
+
+        assert!(
+            parse_cash_token_nft(Some("none"), Some(""))
+                .unwrap()
+                .is_some()
+        );
+        assert!(parse_cash_token_nft(Some("none"), Some(&"aa".repeat(128))).is_ok());
+        assert!(parse_cash_token_nft(Some("none"), Some(&"aa".repeat(129))).is_err());
+    }
+
+    #[test]
+    fn omitted_token_output_value_tracks_commitment_size() {
+        let script = p2pkh_script(&[0x11; 20]);
+        let short = omitted_token_output_value(
+            &script,
+            [0x11; 32],
+            0,
+            Some(&BchNft {
+                capability: BchTokenCapability::None,
+                commitment: vec![0xab; 40],
+            }),
+            BchPolicy::default(),
+        )
+        .unwrap();
+        let long = omitted_token_output_value(
+            &script,
+            [0x11; 32],
+            0,
+            Some(&BchNft {
+                capability: BchTokenCapability::None,
+                commitment: vec![0xab; 128],
+            }),
+            BchPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(short, CASHTOKEN_OUTPUT_DUST);
+        assert!(long > CASHTOKEN_OUTPUT_DUST);
+        let quoted = payment_target_with_nft(
+            &hex::encode([0x11u8; 32]),
+            "0",
+            "cashtoken",
+            Some("1000"),
+            Some(BchNft {
+                capability: BchTokenCapability::None,
+                commitment: vec![0xab; 128],
+            }),
+            &script,
+            BchPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            quoted,
+            BchPaymentTarget::CashToken {
+                category: [0x11; 32],
+                amount: 0,
+                merchant_value: 1_000,
+                nft: Some(BchNft {
+                    capability: BchTokenCapability::None,
+                    commitment: vec![0xab; 128],
+                }),
+            }
+        );
+        let raised = BchPolicy {
+            dust_threshold: 5_000,
+            ..BchPolicy::default()
+        };
+        let floored = omitted_token_output_value(&script, [0x11; 32], 1, None, raised).unwrap();
+        assert_eq!(floored, 5_000);
     }
 }

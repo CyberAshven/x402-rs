@@ -23,7 +23,8 @@ use x402_types::chain::{ChainId, ChainProviderOps};
 use crate::address::{CashAddr, p2pkh_script};
 use crate::chain::BchChainReference;
 use crate::transaction::{
-    BchNft, BchToken, BchTokenCapability, OutPoint, SourceOutput, TxId, is_p2pkh_script,
+    BchNft, BchToken, BchTokenCapability, MAX_TOKEN_COMMITMENT_LENGTH, OutPoint, SourceOutput,
+    TxId, is_p2pkh_script,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -607,7 +608,7 @@ fn parse_token_data(value: Option<&Value>) -> Result<Option<BchToken>, BchProvid
                     BchProviderError::InvalidResponse("invalid CashToken commitment".to_string())
                 })?
                 .unwrap_or_default();
-            if commitment.len() > 40 {
+            if commitment.len() > MAX_TOKEN_COMMITMENT_LENGTH {
                 return Err(BchProviderError::InvalidResponse(
                     "CashToken commitment is too large".to_string(),
                 ));
@@ -630,7 +631,7 @@ fn parse_token_data(value: Option<&Value>) -> Result<Option<BchToken>, BchProvid
     }))
 }
 
-fn parse_token_amount(value: &Value) -> Result<u64, BchProviderError> {
+pub(crate) fn parse_token_amount(value: &Value) -> Result<u64, BchProviderError> {
     let text = value
         .as_str()
         .map(str::to_owned)
@@ -675,6 +676,41 @@ mod tests {
                 Ok(json!({"height": 123}))
             }
         }
+    }
+
+    #[test]
+    fn parses_commitments_through_128_bytes_and_rejects_129() {
+        let category = "11".repeat(32);
+        for length in [0usize, 40, 41, 128] {
+            let commitment = "ab".repeat(length);
+            let parsed = parse_token_data(Some(&json!({
+                "category": category,
+                "amount": "0",
+                "nft": { "capability": "none", "commitment": commitment }
+            })))
+            .unwrap()
+            .unwrap();
+            assert_eq!(parsed.nft.unwrap().commitment.len(), length);
+        }
+        let error = parse_token_data(Some(&json!({
+            "category": category,
+            "amount": "1",
+            "nft": { "capability": "minting", "commitment": "cd".repeat(129) }
+        })))
+        .unwrap_err();
+        assert!(error.to_string().contains("too large"), "{error}");
+    }
+
+    #[test]
+    fn token_amounts_keep_integers_above_the_javascript_safe_range() {
+        assert_eq!(
+            parse_token_amount(&json!("9007199254740993")).unwrap(),
+            9_007_199_254_740_993
+        );
+        assert_eq!(parse_token_amount(&json!(4)).unwrap(), 4);
+        assert!(parse_token_amount(&json!(1.5)).is_err());
+        assert!(parse_token_amount(&json!("01")).is_err());
+        assert!(parse_token_amount(&json!("9223372036854775808")).is_err());
     }
 
     #[test]

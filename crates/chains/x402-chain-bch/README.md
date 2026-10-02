@@ -68,11 +68,16 @@ commitments/capabilities, BCH output values, and token change are validated as
 separate UTXO invariants.
 
 When a CashToken price omits `tokenOutputValue`, the merchant output value
-defaults to 1,000 satoshis, or to the policy dust threshold when that
-threshold is higher. 1,000 satoshis covers the standard relay dust of every
-CashToken locking script this crate can pay (at most 828). An explicit
-`tokenOutputValue` is preserved and must still pass the size-based dust
-check. Native BCH outputs keep the 546-satoshi dust floor.
+defaults to the greater of 1,000 satoshis, the configured policy dust
+threshold, and the standard relay dust of that output. NFT commitments may be
+empty or up to 128 bytes under the current consensus rule
+([CHIP-2024-12](https://github.com/bitjson/bch-p2s)). A 128-byte commitment
+can make the relay dust larger than 1,000 satoshis. The older 828-satoshi
+figure is the relay dust of a 40-byte commitment on the largest locking
+script this crate pays; it is not the maximum for a 128-byte commitment. An
+explicit `tokenOutputValue` is preserved and must still pass the size-based
+dust check. A 129-byte commitment is rejected. Native BCH outputs keep the
+546-satoshi dust floor.
 
 P2SH32 is a valid payment destination for compiled CashScript contracts. The
 facilitator verifies that the requested output pays the requested locking
