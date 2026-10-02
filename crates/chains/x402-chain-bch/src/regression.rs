@@ -1975,9 +1975,10 @@ fn wallet_transaction(
 /// Transactions a third-party wallet may build. The TypeScript package checks
 /// the same cases in test/rust-parity.test.ts and must reach the same verdict.
 ///
-/// Extra outputs, OP_RETURN data, a second payer, and unrelated CashTokens are
-/// accepted when every token is conserved. Burning, minting, changing an NFT,
-/// a second output to the merchant, dust, and more than 16 outputs are not.
+/// Extra outputs, OP_RETURN data, a second payer, unrelated CashTokens, and
+/// P2SH inputs are accepted when every token is conserved. Burning, minting,
+/// changing an NFT, a second output to the merchant, dust, more than 16
+/// outputs, and malformed P2SH unlocking scripts are not.
 #[test]
 fn wallet_shapes_follow_the_typescript_rules() {
     let payer = signer();
@@ -2246,6 +2247,79 @@ fn wallet_shapes_follow_the_typescript_rules() {
             output(96_500, payer_lock.clone(), None),
         ],
     );
+
+    // P2SH inputs. The TypeScript facilitator runs the redeem script in the
+    // Libauth VM; the BCH network runs it for this one when the transaction is
+    // broadcast. Both reject an unlocking script that is not push-only or does
+    // not push the committed redeem script.
+    let redeem = [push_data(&payer.public_key()).unwrap(), vec![0xac]].concat();
+    let p2sh20 = p2sh20_script(&hash160(&redeem));
+    let p2sh32 = p2sh32_script(&crate::transaction::double_sha256(&redeem));
+    type Unlock<'a> = &'a dyn Fn(Vec<u8>) -> Vec<u8>;
+    let p2sh_spend = |utxos: &[BchUtxo], outputs, unlock: Unlock| {
+        let mut transaction = wallet_transaction(utxos, &vec![&payer; utxos.len()], outputs);
+        let index = utxos
+            .iter()
+            .position(|utxo| utxo.source_output.script_pubkey != payer_lock)
+            .unwrap();
+        let covered = SourceOutput {
+            script_pubkey: redeem.clone(),
+            ..utxos[index].source_output.clone()
+        };
+        let digest = transaction
+            .signing_hash(index, &covered, crate::transaction::BCH_SIGHASH_ALL_FORKID)
+            .unwrap();
+        let mut signature = payer.sign_digest(digest).unwrap();
+        signature.push(crate::transaction::BCH_SIGHASH_ALL_FORKID as u8);
+        transaction.inputs[index].script_sig = unlock(signature);
+        transaction
+    };
+    let unlock =
+        |signature: Vec<u8>| [push_data(&signature).unwrap(), push_data(&redeem).unwrap()].concat();
+    let p2sh_cases: [(&str, &str, Vec<BchUtxo>, Unlock); 4] = [
+        (
+            "external-native-p2sh20-input",
+            "ok",
+            vec![owned_utxo(1, 100_000, p2sh20.clone(), None)],
+            &unlock,
+        ),
+        (
+            "external-native-p2pkh-and-p2sh32-inputs",
+            "ok",
+            vec![bch(1, 50_000), owned_utxo(2, 50_000, p2sh32.clone(), None)],
+            &unlock,
+        ),
+        (
+            "external-reject-p2sh-wrong-redeem-script",
+            "reject",
+            vec![owned_utxo(1, 100_000, p2sh20.clone(), None)],
+            &|signature: Vec<u8>| {
+                let other_redeem = [redeem.clone(), vec![0x61]].concat();
+                [
+                    push_data(&signature).unwrap(),
+                    push_data(&other_redeem).unwrap(),
+                ]
+                .concat()
+            },
+        ),
+        (
+            "external-reject-p2sh-non-push-unlocking",
+            "reject",
+            vec![owned_utxo(1, 100_000, p2sh32.clone(), None)],
+            &|signature: Vec<u8>| [vec![0x61], unlock(signature)].concat(),
+        ),
+    ];
+    for (id, expect, utxos, unlock) in p2sh_cases {
+        let transaction = p2sh_spend(
+            &utxos,
+            vec![
+                output(1_000, native_merchant.clone(), None),
+                output(97_000, payer_lock.clone(), None),
+            ],
+            unlock,
+        );
+        cases.push((id, expect, native.clone(), utxos, transaction));
+    }
 
     let mut vectors = Vec::new();
     for (id, expect, requirements, utxos, transaction) in cases {

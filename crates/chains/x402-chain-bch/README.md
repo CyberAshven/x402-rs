@@ -32,9 +32,15 @@ may add other outputs up to `BchPolicy::max_outputs` (16 by default), including
 OP_RETURN data, and may spend inputs from more than one P2PKH key. Every
 CashToken category and NFT must leave the transaction unchanged, so minting,
 burning, and NFT capability changes are rejected. These are the same rules as
-`@optnlabs/x402-bch`, with one difference: inputs must be P2PKH. This crate has
-no BCH script VM, so it cannot validate P2SH inputs the way the TypeScript
-package does with Libauth.
+`@optnlabs/x402-bch`.
+
+P2PKH inputs are verified here, signature included. Other inputs, such as
+P2SH20 and P2SH32 contracts, are checked for a push-only unlocking script and,
+for P2SH, the redeem script their source output commits to. This crate has no
+BCH script VM, so the network runs those scripts when the facilitator
+broadcasts the transaction, and settlement fails if one is invalid. The
+TypeScript package runs them in the Libauth VM before broadcast. Both accept
+the same valid payments.
 
 The wallet-facing request uses `mainnet` or `chipnet`. The x402 wire network
 identities remain `bch:bitcoincash` and `bch:bchtest`.

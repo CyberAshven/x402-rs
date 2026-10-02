@@ -23,8 +23,7 @@ use x402_types::chain::{ChainId, ChainProviderOps};
 use crate::address::{CashAddr, p2pkh_script};
 use crate::chain::BchChainReference;
 use crate::transaction::{
-    BchNft, BchToken, BchTokenCapability, MAX_TOKEN_COMMITMENT_LENGTH, OutPoint, SourceOutput,
-    TxId, is_p2pkh_script,
+    BchNft, BchToken, BchTokenCapability, MAX_TOKEN_COMMITMENT_LENGTH, OutPoint, SourceOutput, TxId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,9 +299,6 @@ impl<T: FulcrumTransport> BchChainProvider for FulcrumProvider<T> {
         outpoint: &OutPoint,
         source_output: &SourceOutput,
     ) -> Result<BchOutpointStatus, BchProviderError> {
-        if !is_p2pkh_script(&source_output.script_pubkey) {
-            return Ok(BchOutpointStatus::Unknown);
-        }
         let mut script_hash = Sha256::digest(&source_output.script_pubkey);
         script_hash.reverse();
         let result = self

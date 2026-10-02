@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
-use crate::address::{CashAddr, hash160, p2pkh_script};
+use crate::address::{CashAddr, CashAddrScript, CashAddrType, hash160, p2pkh_script};
 use crate::chain::BchChainReference;
 
 pub const BCH_SIGHASH_ALL_FORKID: u32 = 0x41;
@@ -321,6 +321,40 @@ impl BchTransaction {
             .map_err(|_| TransactionError::InvalidSignature)?;
         Ok(public_key_hash)
     }
+
+    /// Check an input that is not P2PKH without running its script.
+    ///
+    /// The unlocking bytecode must be push-only, and a P2SH20 or P2SH32 input
+    /// must push the redeem script its source output commits to. The BCH
+    /// network runs the scripts when the transaction is broadcast, so a
+    /// settlement fails if one of them is invalid.
+    pub fn check_script_input(
+        &self,
+        input_index: usize,
+        source_output: &SourceOutput,
+    ) -> Result<(), TransactionError> {
+        let input = self
+            .inputs
+            .get(input_index)
+            .ok_or(TransactionError::Truncated)?;
+        let stack = unlocking_stack(&input.script_sig)?;
+        let script = &source_output.script_pubkey;
+        let redeem_script = stack.last().map(Vec::as_slice).unwrap_or_default();
+        let committed = if is_p2sh20_script(script) {
+            hash160(redeem_script)[..] == script[2..22]
+        } else if is_p2sh32_script(script) {
+            double_sha256(redeem_script)[..] == script[2..34]
+        } else {
+            true
+        };
+        if !committed {
+            return Err(TransactionError::PolicyViolation(
+                "P2SH input does not push the redeem script its source output commits to"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Floor for a CashToken merchant output when the price omits `value`.
@@ -518,7 +552,8 @@ pub fn parse_cash_token_nft(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPayment {
     pub txid: TxId,
-    pub payer: CashAddr,
+    /// CashAddr of the first P2PKH input, or of the first input's script.
+    pub payer: String,
     pub fee: u64,
     pub input_value: u64,
     pub output_value: u64,
@@ -574,10 +609,12 @@ pub fn verify_payment(
         input_value = input_value
             .checked_add(source_output.value)
             .ok_or(TransactionError::ArithmeticOverflow)?;
-        // There is no BCH script VM here, so every input must be a P2PKH spend
-        // whose signature can be checked directly.
-        let hash = transaction.verify_p2pkh_input(index, source_output)?;
-        payer_hash.get_or_insert(hash);
+        if is_p2pkh_script(&source_output.script_pubkey) {
+            let hash = transaction.verify_p2pkh_input(index, source_output)?;
+            payer_hash.get_or_insert(hash);
+        } else {
+            transaction.check_script_input(index, source_output)?;
+        }
         if let Some(token) = &source_output.token {
             input_tokens.add(token);
         }
@@ -667,13 +704,13 @@ pub fn verify_payment(
         ));
     }
 
-    let payer_hash = payer_hash.ok_or(TransactionError::InvalidSignature)?;
+    let payer = match payer_hash {
+        Some(hash160) => CashAddr { network, hash160 }.to_string(),
+        None => script_payer(&source_outputs[0], network),
+    };
     Ok(VerifiedPayment {
         txid: transaction.txid(),
-        payer: CashAddr {
-            network,
-            hash160: payer_hash,
-        },
+        payer,
         fee,
         input_value,
         output_value,
@@ -718,6 +755,27 @@ impl TokenLedger {
         self.nfts
             .contains_key(&(*category, nft.capability, nft.commitment.clone()))
     }
+}
+
+/// Address of a payer whose inputs are all non-P2PKH, as the TypeScript
+/// package reports it.
+fn script_payer(source: &SourceOutput, network: BchChainReference) -> String {
+    let script = &source.script_pubkey;
+    let (kind, payload) = if is_p2sh20_script(script) {
+        (CashAddrType::P2sh20, &script[2..22])
+    } else if is_p2sh32_script(script) {
+        (CashAddrType::P2sh32, &script[2..34])
+    } else {
+        return format!("bch:script:{}", hex::encode(script));
+    };
+    CashAddrScript {
+        network,
+        kind,
+        payload: payload.to_vec(),
+        token_support: source.token.is_some(),
+    }
+    .encode()
+    .unwrap_or_else(|_| format!("bch:script:{}", hex::encode(script)))
 }
 
 fn is_op_return_script(script: &[u8]) -> bool {
@@ -934,6 +992,59 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     let mut result = [0u8; 32];
     result.copy_from_slice(&second);
     result
+}
+
+/// Evaluate push-only unlocking bytecode into the stack it leaves.
+fn unlocking_stack(script: &[u8]) -> Result<Vec<Vec<u8>>, TransactionError> {
+    let mut stack = Vec::new();
+    let mut offset = 0usize;
+    while offset < script.len() {
+        let opcode = script[offset];
+        offset += 1;
+        let length = match opcode {
+            0x00 => 0,
+            0x01..=0x4b => usize::from(opcode),
+            0x4c..=0x4e => {
+                let width = match opcode {
+                    0x4c => 1,
+                    0x4d => 2,
+                    _ => 4,
+                };
+                let bytes = script
+                    .get(offset..offset + width)
+                    .ok_or(TransactionError::InvalidScript)?;
+                offset += width;
+                let mut length = [0u8; 4];
+                length[..width].copy_from_slice(bytes);
+                usize::try_from(u32::from_le_bytes(length))
+                    .map_err(|_| TransactionError::InvalidScript)?
+            }
+            0x4f => {
+                stack.push(vec![0x81]);
+                continue;
+            }
+            0x51..=0x60 => {
+                stack.push(vec![opcode - 0x50]);
+                continue;
+            }
+            _ => {
+                return Err(TransactionError::PolicyViolation(
+                    "unlocking bytecode must be push-only".to_string(),
+                ));
+            }
+        };
+        let end = offset
+            .checked_add(length)
+            .ok_or(TransactionError::InvalidScript)?;
+        stack.push(
+            script
+                .get(offset..end)
+                .ok_or(TransactionError::InvalidScript)?
+                .to_vec(),
+        );
+        offset = end;
+    }
+    Ok(stack)
 }
 
 fn parse_pushes(script: &[u8]) -> Result<Vec<&[u8]>, TransactionError> {
