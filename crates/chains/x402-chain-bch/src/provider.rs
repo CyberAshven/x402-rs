@@ -497,8 +497,11 @@ fn parse_bch_amount(value: &Value) -> Result<u64, BchProviderError> {
     let amount = if decimal_places <= 8 {
         let scale = u32::try_from(8 - decimal_places)
             .map_err(|_| BchProviderError::InvalidResponse("BCH amount overflow".to_string()))?;
+        let scale_factor = 10u128
+            .checked_pow(scale)
+            .ok_or_else(|| BchProviderError::InvalidResponse("BCH amount overflow".to_string()))?;
         unscaled
-            .checked_mul(10u128.pow(scale))
+            .checked_mul(scale_factor)
             .ok_or_else(|| BchProviderError::InvalidResponse("BCH amount overflow".to_string()))?
     } else {
         let scale = u32::try_from(decimal_places - 8)
@@ -669,12 +672,22 @@ mod tests {
         assert_eq!(parse_bch_amount(&json!("0.00000001")).unwrap(), 1);
         assert_eq!(parse_bch_amount(&json!(1e-8)).unwrap(), 1);
         assert!(parse_bch_amount(&json!("1.000000001")).is_err());
+        assert_eq!(parse_bch_amount(&json!("1e-2")).unwrap(), 1_000_000);
         assert_eq!(parse_satoshi_amount(&json!(1)).unwrap(), 1);
         assert_eq!(
             parse_satoshi_amount(&json!("100000000")).unwrap(),
             100_000_000
         );
         assert!(parse_satoshi_amount(&json!("0.00000001")).is_err());
+    }
+
+    #[test]
+    fn rejects_bch_amount_exponent_that_overflows_the_scale() {
+        let error = parse_bch_amount(&json!("1e100")).unwrap_err();
+        assert!(
+            matches!(error, BchProviderError::InvalidResponse(_)),
+            "{error:?}"
+        );
     }
 
     #[test]

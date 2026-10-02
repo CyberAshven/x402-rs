@@ -17,14 +17,15 @@ use x402_types::util::Base64Bytes;
 use crate::address::{CashAddr, hash160, p2pkh_script};
 use crate::provider::{BchChainProvider, BchUtxo};
 use crate::transaction::{
-    BCH_SIGHASH_ALL_FORKID, BchPaymentTarget, BchPolicy, BchTransaction, TxInput, TxOutput,
-    is_supported_merchant_script, parse_cash_token_nft, payment_target_with_nft, push_data,
-    verify_payment,
+    BCH_SIGHASH_ALL_FORKID, BchPaymentTarget, BchPolicy, BchToken, BchTokenCapability,
+    BchTransaction, TxInput, TxOutput, is_supported_merchant_script, parse_cash_token_nft,
+    payment_target_with_nft, push_data, verify_payment,
 };
 use crate::transaction::{BchNft, TransactionError};
 use crate::v2_bch_exact::V2BchExact;
 use crate::v2_bch_exact::types::{
-    BchExtra, BchTransactionRequest, ExactBchPayload, PaymentPayload, PaymentRequirements,
+    BchExtra, BchNftRequest, BchTokenRequest, BchTransactionRequest, ExactBchPayload,
+    PaymentPayload, PaymentRequirements,
 };
 
 fn requested_nft(
@@ -210,6 +211,29 @@ fn transaction_request(
 ) -> Result<BchTransactionRequest, X402Error> {
     let network = crate::BchChainReference::try_from(requirements.network.clone())
         .map_err(|error| X402Error::SigningError(error.to_string()))?;
+    let token = if requirements.extra.asset_transfer_method == "cashtoken" {
+        let nft = requested_nft(
+            &requirements.extra,
+            &requirements.asset,
+            &requirements.amount,
+        )
+        .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        Some(BchTokenRequest {
+            category: requirements.asset.clone(),
+            amount: requirements.amount.clone(),
+            nft: nft.map(|nft| BchNftRequest {
+                capability: match nft.capability {
+                    BchTokenCapability::None => "none",
+                    BchTokenCapability::Mutable => "mutable",
+                    BchTokenCapability::Minting => "minting",
+                }
+                .to_string(),
+                commitment: hex::encode(nft.commitment),
+            }),
+        })
+    } else {
+        requirements.extra.token.clone()
+    };
     Ok(BchTransactionRequest {
         network: if network.is_test_network() {
             crate::v2_bch_exact::types::BchTransactionNetwork::Chipnet
@@ -218,7 +242,7 @@ fn transaction_request(
         },
         recipient: requirements.pay_to.clone(),
         amount: requirements.amount.clone(),
-        token: requirements.extra.token.clone(),
+        token,
     })
 }
 
@@ -482,6 +506,8 @@ where
                         wallet: self.wallet.clone(),
                         provider: self.provider.clone(),
                         policy: self.policy,
+                        resource: payment_required.resource.clone(),
+                        extensions: payment_required.extensions.clone(),
                         requirements,
                         requirements_json: original.clone(),
                     }),
@@ -495,6 +521,8 @@ struct BchWalletPayloadSigner<W, P> {
     wallet: W,
     provider: P,
     policy: BchPolicy,
+    resource: Option<ResourceInfo>,
+    extensions: ExtensionsJson,
     requirements: PaymentRequirements,
     requirements_json: OriginalJson,
 }
@@ -556,9 +584,9 @@ where
             payload: ExactBchPayload {
                 transaction: Base64Bytes::encode(raw).to_string(),
             },
-            resource: None,
+            resource: self.resource.clone(),
             x402_version: X402Version2,
-            extensions: ExtensionsJson::default(),
+            extensions: self.extensions.clone(),
         };
         Ok(Base64Bytes::encode(serde_json::to_vec(&payment)?).to_string())
     }
@@ -621,16 +649,18 @@ where
             }
             match &target {
                 BchPaymentTarget::Native { .. } if utxo.source_output.token.is_none() => {
-                    pure_bch_utxos.push(utxo)
+                    pure_bch_utxos.push(utxo);
                 }
-                BchPaymentTarget::CashToken { category, .. }
-                    if utxo.source_output.token.as_ref().is_some_and(|token| {
-                        token.category == *category && token.nft.is_none()
-                    }) =>
-                {
-                    token_utxos.push(utxo)
+                BchPaymentTarget::CashToken { category, nft, .. } => {
+                    match &utxo.source_output.token {
+                        None => pure_bch_utxos.push(utxo),
+                        Some(token) if token.category == *category && token.nft == *nft => {
+                            token_utxos.push(utxo);
+                        }
+                        Some(_) => {}
+                    }
                 }
-                _ => {}
+                BchPaymentTarget::Native { .. } => {}
             }
         }
         token_utxos.sort_by_key(|utxo| std::cmp::Reverse(utxo.source_output.value));
@@ -656,43 +686,81 @@ where
                 )
                 .ok_or_else(|| X402Error::SigningError("CashToken amount overflow".to_string()))?;
             selected.push(utxo);
-            let estimated_size = 10usize
-                .saturating_add(selected.len().saturating_mul(180))
-                .saturating_add(34 * 2);
-            let required = target_merchant_value(&target)
-                .checked_add(estimated_size as u64 * self.policy.fee_rate_sat_per_byte)
-                .ok_or_else(|| X402Error::SigningError("payment amount overflow".to_string()))?;
-            if selected_token_covers(&target, selected_token_amount) && selected_value >= required {
+            if selection_funded(
+                &target,
+                &selected,
+                selected_value,
+                selected_token_amount,
+                self.policy,
+            )? {
                 break;
             }
         }
+        let mut next_pure_bch = 0usize;
         if matches!(&target, BchPaymentTarget::CashToken { .. }) {
-            for utxo in pure_bch_utxos {
-                if selected_token_covers(&target, selected_token_amount)
-                    && selected_value >= target_merchant_value(&target)
-                {
+            while next_pure_bch < pure_bch_utxos.len() {
+                if selection_funded(
+                    &target,
+                    &selected,
+                    selected_value,
+                    selected_token_amount,
+                    self.policy,
+                )? {
                     break;
                 }
+                let utxo = pure_bch_utxos[next_pure_bch].clone();
+                next_pure_bch += 1;
                 selected_value = selected_value
                     .checked_add(utxo.source_output.value)
                     .ok_or_else(|| X402Error::SigningError("UTXO value overflow".to_string()))?;
                 selected.push(utxo);
             }
         }
-        if !selected_token_covers(&target, selected_token_amount)
-            || selected_value < target_merchant_value(&target)
-        {
+        if !selection_funded(
+            &target,
+            &selected,
+            selected_value,
+            selected_token_amount,
+            self.policy,
+        )? {
             return Err(X402Error::SigningError(
                 "insufficient BCH/CashToken UTXOs for payment and fee".to_string(),
             ));
         }
 
-        let transaction = build_and_sign_transaction(
-            &selected,
-            pay_to.locking_script(),
-            target,
-            &self.signer,
+        let merchant_script = pay_to.locking_script();
+        let transaction = loop {
+            match build_and_sign_transaction(
+                &selected,
+                merchant_script.clone(),
+                target.clone(),
+                &self.signer,
+                network,
+                self.policy,
+            ) {
+                Ok(transaction) => break transaction,
+                Err(error)
+                    if matches!(&target, BchPaymentTarget::CashToken { .. })
+                        && funding_shortfall(&error)
+                        && next_pure_bch < pure_bch_utxos.len() =>
+                {
+                    let utxo = pure_bch_utxos[next_pure_bch].clone();
+                    next_pure_bch += 1;
+                    selected.push(utxo);
+                }
+                Err(error) => return Err(X402Error::SigningError(error.to_string())),
+            }
+        };
+        let sources = selected
+            .iter()
+            .map(|utxo| utxo.source_output.clone())
+            .collect::<Vec<_>>();
+        verify_payment(
+            &transaction,
+            &sources,
             network,
+            &merchant_script,
+            &target,
             self.policy,
         )
         .map_err(|error| X402Error::SigningError(error.to_string()))?;
@@ -751,6 +819,11 @@ pub fn build_and_sign_transaction<S: BchSigner>(
     if !selected_token_covers(&target, input_token_amount) {
         return Err(crate::transaction::TransactionError::PolicyViolation(
             "selected CashToken UTXOs do not cover payment".to_string(),
+        ));
+    }
+    if !selected_nft_present(&target, selected) {
+        return Err(crate::transaction::TransactionError::PolicyViolation(
+            "selected CashToken UTXOs do not contain the requested NFT".to_string(),
         ));
     }
     if input_value < merchant_value {
@@ -812,6 +885,7 @@ pub fn build_and_sign_transaction<S: BchSigner>(
                     "transaction exceeds maximum size".to_string(),
                 ));
             }
+            ensure_standard_dust(&transaction, policy)?;
             return Ok(transaction);
         }
 
@@ -836,6 +910,7 @@ pub fn build_and_sign_transaction<S: BchSigner>(
                 "transaction exceeds maximum size".to_string(),
             ));
         }
+        ensure_standard_dust(&transaction, policy)?;
         return Ok(transaction);
     }
     Err(crate::transaction::TransactionError::PolicyViolation(
@@ -862,11 +937,14 @@ fn unsigned_transaction(
         script_pubkey: merchant_script,
         token: match target {
             BchPaymentTarget::CashToken {
-                category, amount, ..
-            } => Some(crate::transaction::BchToken {
+                category,
+                amount,
+                nft,
+                ..
+            } => Some(BchToken {
                 category: *category,
                 amount: *amount,
-                nft: None,
+                nft: nft.clone(),
             }),
             BchPaymentTarget::Native { .. } => None,
         },
@@ -886,6 +964,21 @@ fn unsigned_transaction(
     }
 }
 
+fn ensure_standard_dust(
+    transaction: &BchTransaction,
+    policy: BchPolicy,
+) -> Result<(), crate::transaction::TransactionError> {
+    for output in &transaction.outputs {
+        let minimum = crate::transaction::standard_output_dust(output, policy.dust_threshold)?;
+        if output.value < minimum {
+            return Err(crate::transaction::TransactionError::PolicyViolation(
+                "output is below the standard BCH dust threshold".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn target_merchant_value(target: &BchPaymentTarget) -> u64 {
     match target {
         BchPaymentTarget::Native { merchant_value, .. }
@@ -897,6 +990,79 @@ fn selected_token_covers(target: &BchPaymentTarget, selected_token_amount: u64) 
     match target {
         BchPaymentTarget::Native { .. } => true,
         BchPaymentTarget::CashToken { amount, .. } => selected_token_amount >= *amount,
+    }
+}
+
+fn selected_nft_present(target: &BchPaymentTarget, selected: &[BchUtxo]) -> bool {
+    match target {
+        BchPaymentTarget::Native { .. } | BchPaymentTarget::CashToken { nft: None, .. } => true,
+        BchPaymentTarget::CashToken {
+            nft: Some(expected),
+            ..
+        } => selected.iter().any(|utxo| {
+            utxo.source_output
+                .token
+                .as_ref()
+                .is_some_and(|token| token.nft.as_ref() == Some(expected))
+        }),
+    }
+}
+
+fn selection_funded(
+    target: &BchPaymentTarget,
+    selected: &[BchUtxo],
+    selected_value: u64,
+    selected_token_amount: u64,
+    policy: BchPolicy,
+) -> Result<bool, X402Error> {
+    if !selected_token_covers(target, selected_token_amount)
+        || !selected_nft_present(target, selected)
+    {
+        return Ok(false);
+    }
+    let estimated_size = 10u64
+        .saturating_add((selected.len() as u64).saturating_mul(180))
+        .saturating_add(34 * 2);
+    let fee = estimated_size
+        .checked_mul(policy.fee_rate_sat_per_byte)
+        .ok_or_else(|| X402Error::SigningError("payment amount overflow".to_string()))?;
+    let mut required = target_merchant_value(target)
+        .checked_add(fee)
+        .ok_or_else(|| X402Error::SigningError("payment amount overflow".to_string()))?;
+    if let BchPaymentTarget::CashToken {
+        category, amount, ..
+    } = target
+        && selected_token_amount > *amount
+    {
+        let change = TxOutput {
+            value: 0,
+            script_pubkey: vec![0u8; 25],
+            token: Some(BchToken {
+                category: *category,
+                amount: selected_token_amount - *amount,
+                nft: None,
+            }),
+        };
+        let dust = crate::transaction::standard_output_dust(&change, policy.dust_threshold)
+            .map_err(|error| X402Error::SigningError(error.to_string()))?;
+        required = required
+            .checked_add(dust)
+            .ok_or_else(|| X402Error::SigningError("payment amount overflow".to_string()))?;
+    }
+    Ok(selected_value >= required)
+}
+
+fn funding_shortfall(error: &crate::transaction::TransactionError) -> bool {
+    match error {
+        crate::transaction::TransactionError::PolicyViolation(message) => matches!(
+            message.as_str(),
+            "output is below the standard BCH dust threshold"
+                | "selected BCH UTXOs do not cover fee"
+                | "selected BCH UTXOs do not cover token change dust"
+                | "CashToken change requires a dust-valued BCH change output"
+                | "fee/change calculation did not converge"
+        ),
+        _ => false,
     }
 }
 

@@ -17,6 +17,9 @@ pub mod settlement;
 pub mod transaction;
 pub mod v2_bch_exact;
 
+#[cfg(test)]
+mod regression;
+
 pub use chain::{BCH_NAMESPACE, BchChainReference, BchChainReferenceFormatError};
 pub use provider::{
     BchChainProvider, BchOutpointStatus, BchProviderError, BchTransactionStatus, BchUtxo,

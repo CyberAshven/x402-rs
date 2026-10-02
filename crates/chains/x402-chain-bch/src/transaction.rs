@@ -148,10 +148,7 @@ impl BchTransaction {
     pub fn parse(raw: &[u8]) -> Result<Self, TransactionError> {
         let mut reader = Reader::new(raw);
         let version = reader.i32()?;
-        let input_count = reader.varint()? as usize;
-        if input_count == 0 || input_count > 10_000 {
-            return Err(TransactionError::ExcessiveCount);
-        }
+        let input_count = bounded_count(reader.varint()?, 10_000)?;
         let mut inputs = Vec::with_capacity(input_count);
         for _ in 0..input_count {
             let mut txid_wire = [0u8; 32];
@@ -169,10 +166,7 @@ impl BchTransaction {
                 sequence,
             });
         }
-        let output_count = reader.varint()? as usize;
-        if output_count == 0 || output_count > 10_000 {
-            return Err(TransactionError::ExcessiveCount);
-        }
+        let output_count = bounded_count(reader.varint()?, 10_000)?;
         let mut outputs = Vec::with_capacity(output_count);
         for _ in 0..output_count {
             let value = reader.u64()?;
@@ -312,10 +306,10 @@ impl BchTransaction {
         }
         let signature = Signature::from_der(&signature_bytes[..signature_bytes.len() - 1])
             .map_err(|_| TransactionError::InvalidSignature)?;
-        let public_key =
-            PublicKey::from_slice(pushes[1]).map_err(|_| TransactionError::InvalidPublicKey)?;
-        let public_key_bytes = public_key.serialize();
-        let public_key_hash = hash160(&public_key_bytes);
+        let public_key_bytes = pushes[1];
+        let public_key = PublicKey::from_slice(public_key_bytes)
+            .map_err(|_| TransactionError::InvalidPublicKey)?;
+        let public_key_hash = hash160(public_key_bytes);
         if source_output.script_pubkey[3..23] != public_key_hash[..] {
             return Err(TransactionError::InvalidSignature);
         }
@@ -327,6 +321,10 @@ impl BchTransaction {
         Ok(public_key_hash)
     }
 }
+
+/// Headroom above the 546-sat native dust floor. Every supported CashToken
+/// locking script has a standard relay dust of at most 828 sats.
+pub(crate) const CASHTOKEN_OUTPUT_DUST: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BchPolicy {
@@ -415,7 +413,7 @@ pub fn payment_target_with_nft(
     let merchant_value = token_output_value
         .map(parse_canonical_satoshi_amount)
         .transpose()?
-        .unwrap_or(policy.dust_threshold);
+        .unwrap_or(policy.dust_threshold.max(CASHTOKEN_OUTPUT_DUST));
     Ok(BchPaymentTarget::CashToken {
         category: parse_cash_token_category(asset)?,
         amount,
@@ -613,6 +611,12 @@ pub fn verify_payment(
                 "BCH exact change outputs must be standard P2PKH".to_string(),
             ));
         }
+        let minimum_output = standard_output_dust(output, policy.dust_threshold)?;
+        if output.value < minimum_output {
+            return Err(TransactionError::PolicyViolation(
+                "output is below the standard BCH dust threshold".to_string(),
+            ));
+        }
         if let Some(token) = &output.token {
             match target {
                 BchPaymentTarget::Native { .. } => {
@@ -648,7 +652,7 @@ pub fn verify_payment(
             "CashToken amount is not conserved".to_string(),
         ));
     }
-    if requested_token_amount == 0 && output_token_amount != 0 {
+    if matches!(target, BchPaymentTarget::Native { .. }) && output_token_amount != 0 {
         return Err(TransactionError::PolicyViolation(
             "native BCH payment cannot contain CashTokens".to_string(),
         ));
@@ -739,8 +743,8 @@ pub fn verify_payment(
 }
 
 fn validate_payment_target(target: &BchPaymentTarget) -> Result<(), TransactionError> {
-    if let BchPaymentTarget::CashToken { amount, .. } = target
-        && (*amount == 0 || *amount > i64::MAX as u64)
+    if let BchPaymentTarget::CashToken { amount, nft, .. } = target
+        && ((*amount == 0 && nft.is_none()) || *amount > i64::MAX as u64)
     {
         return Err(TransactionError::PolicyViolation(
             "CashToken amount is outside the BCH token range".to_string(),
@@ -1014,6 +1018,48 @@ fn write_varint(value: u64, output: &mut Vec<u8>) {
     }
 }
 
+fn varint_size(value: u64) -> u64 {
+    if value <= 252 {
+        1
+    } else if value <= u64::from(u16::MAX) {
+        3
+    } else if value <= u64::from(u32::MAX) {
+        5
+    } else {
+        9
+    }
+}
+
+/// Standard BCH relay dust: 3 sat/byte over the output plus a 148-byte P2PKH spend.
+pub(crate) fn standard_output_dust(output: &TxOutput, floor: u64) -> Result<u64, TransactionError> {
+    let field = serialize_token_prefix_and_script(output.token.as_ref(), &output.script_pubkey)?;
+    let output_len = 8u64
+        .checked_add(varint_size(field.len() as u64))
+        .and_then(|total| total.checked_add(field.len() as u64))
+        .ok_or(TransactionError::ArithmeticOverflow)?;
+    let spend_len = output_len
+        .checked_add(148)
+        .ok_or(TransactionError::ArithmeticOverflow)?;
+    let standard = spend_len
+        .checked_mul(3)
+        .ok_or(TransactionError::ArithmeticOverflow)?;
+    Ok(standard.max(floor))
+}
+
+fn bounded_count(value: u64, limit: u64) -> Result<usize, TransactionError> {
+    if value == 0 || value > limit {
+        return Err(TransactionError::ExcessiveCount);
+    }
+    usize::try_from(value).map_err(|_| TransactionError::ExcessiveCount)
+}
+
+fn field_len(value: u64) -> Result<usize, TransactionError> {
+    if value > u64::from(u32::MAX) {
+        return Err(TransactionError::ExcessiveCount);
+    }
+    usize::try_from(value).map_err(|_| TransactionError::ExcessiveCount)
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -1090,7 +1136,7 @@ impl<'a> Reader<'a> {
     }
 
     fn bytes(&mut self) -> Result<Vec<u8>, TransactionError> {
-        let length = self.varint()? as usize;
+        let length = field_len(self.varint()?)?;
         Ok(self.take(length)?.to_vec())
     }
 
@@ -1402,6 +1448,120 @@ mod tests {
                 .amount
                 .to_string(),
             fixture.change_token_amount
+        );
+    }
+
+    fn signed_p2pkh(
+        secp: &Secp256k1<secp256k1::All>,
+        secret: &secp256k1::SecretKey,
+        public_key: &[u8],
+        source: &SourceOutput,
+    ) -> BchTransaction {
+        let mut transaction = BchTransaction {
+            version: 2,
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: TxId([9; 32]),
+                    vout: 1,
+                },
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            outputs: vec![TxOutput {
+                value: 1_000,
+                script_pubkey: p2pkh_script(&[7; 20]),
+                token: None,
+            }],
+            lock_time: 0,
+        };
+        let digest = transaction
+            .signing_hash(0, source, BCH_SIGHASH_ALL_FORKID)
+            .unwrap();
+        let mut signature = secp
+            .sign_ecdsa(Message::from_digest(digest), secret)
+            .serialize_der()
+            .to_vec();
+        signature.push(BCH_SIGHASH_ALL_FORKID as u8);
+        let mut script_sig = push_data(&signature).unwrap();
+        script_sig.extend_from_slice(&push_data(public_key).unwrap());
+        transaction.inputs[0].script_sig = script_sig;
+        transaction
+    }
+
+    #[test]
+    fn hashes_the_public_key_bytes_from_the_unlocking_script() {
+        let secp = Secp256k1::new();
+        let secret = secp256k1::SecretKey::from_byte_array([0x11; 32]).unwrap();
+        let public_key = PublicKey::from_secret_key(&secp, &secret);
+        let compressed = public_key.serialize();
+        let uncompressed = public_key.serialize_uncompressed();
+        assert_ne!(hash160(&compressed), hash160(&uncompressed));
+
+        let uncompressed_source = SourceOutput {
+            value: 2_000,
+            script_pubkey: p2pkh_script(&hash160(&uncompressed)),
+            token: None,
+        };
+        let uncompressed_tx = signed_p2pkh(&secp, &secret, &uncompressed, &uncompressed_source);
+        assert_eq!(
+            uncompressed_tx
+                .verify_p2pkh_input(0, &uncompressed_source)
+                .expect("uncompressed public-key bytes must hash as pushed"),
+            hash160(&uncompressed)
+        );
+
+        let compressed_source = SourceOutput {
+            value: 2_000,
+            script_pubkey: p2pkh_script(&hash160(&compressed)),
+            token: None,
+        };
+        let compressed_tx = signed_p2pkh(&secp, &secret, &compressed, &compressed_source);
+        assert_eq!(
+            compressed_tx
+                .verify_p2pkh_input(0, &compressed_source)
+                .unwrap(),
+            hash160(&compressed)
+        );
+
+        let mismatched = signed_p2pkh(&secp, &secret, &uncompressed, &compressed_source);
+        assert!(
+            mismatched
+                .verify_p2pkh_input(0, &compressed_source)
+                .is_err(),
+            "uncompressed unlocking bytes must not satisfy a compressed P2PKH script"
+        );
+    }
+
+    #[test]
+    fn rejects_script_length_above_32_bit_as_excessive_count() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&2i32.to_le_bytes());
+        raw.push(1);
+        raw.extend_from_slice(&[0u8; 32]);
+        raw.extend_from_slice(&0u32.to_le_bytes());
+        raw.push(0);
+        raw.extend_from_slice(&u32::MAX.to_le_bytes());
+        raw.push(1);
+        raw.extend_from_slice(&1_000u64.to_le_bytes());
+        raw.push(255);
+        raw.extend_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
+        let error = BchTransaction::parse(&raw).unwrap_err();
+        assert!(
+            matches!(error, TransactionError::ExcessiveCount),
+            "script length above 32 bits must fail closed, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_input_count_that_would_truncate_on_32_bit() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&2i32.to_le_bytes());
+        raw.push(255);
+        raw.extend_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
+        let error = BchTransaction::parse(&raw).unwrap_err();
+        assert!(
+            matches!(error, TransactionError::ExcessiveCount),
+            "{error:?}"
         );
     }
 }

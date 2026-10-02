@@ -17,6 +17,7 @@ pub struct BchTransactionRequest {
     pub network: BchTransactionNetwork,
     pub recipient: String,
     pub amount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<BchTokenRequest>,
 }
 
@@ -36,6 +37,7 @@ pub struct BchExtra {
 pub struct BchTokenRequest {
     pub category: String,
     pub amount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nft: Option<BchNftRequest>,
 }
 

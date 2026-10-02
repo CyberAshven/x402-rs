@@ -204,13 +204,18 @@ where
                 Ok(BchTransactionStatus::Mempool | BchTransactionStatus::Confirmed { .. }) => {
                     expected_txid
                 }
-                _ => {
+                Ok(BchTransactionStatus::NotFound) => {
                     self.settlement_store
                         .release(&expected_txid.to_string())
                         .await;
                     return Err(X402SchemeFacilitatorError::OnchainFailure(
                         error.to_string(),
                     ));
+                }
+                Ok(BchTransactionStatus::Unknown | BchTransactionStatus::Conflicted) | Err(_) => {
+                    return Err(X402SchemeFacilitatorError::OnchainFailure(format!(
+                        "broadcast outcome unknown: {error}"
+                    )));
                 }
             },
         };
@@ -333,7 +338,12 @@ where
                     let tip = self.provider.tip_height().await.map_err(|error| {
                         X402SchemeFacilitatorError::OnchainFailure(error.to_string())
                     })?;
-                    let confirmations = tip.saturating_sub(height).saturating_add(1);
+                    let Some(depth) = tip.checked_sub(height) else {
+                        return Ok(false);
+                    };
+                    let Some(confirmations) = depth.checked_add(1) else {
+                        return Ok(false);
+                    };
                     Ok(confirmations >= required)
                 }
                 _ => Ok(false),

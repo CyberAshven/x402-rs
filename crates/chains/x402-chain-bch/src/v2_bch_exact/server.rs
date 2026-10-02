@@ -57,7 +57,11 @@ impl V2BchExact {
             payment_flow: "upfront".to_string(),
             token_output_value: Some(
                 token_output_value
-                    .unwrap_or(BchPolicy::default().dust_threshold)
+                    .unwrap_or(
+                        BchPolicy::default()
+                            .dust_threshold
+                            .max(crate::transaction::CASHTOKEN_OUTPUT_DUST),
+                    )
                     .to_string(),
             ),
             token: None,
