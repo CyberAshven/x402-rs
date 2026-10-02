@@ -8,10 +8,15 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
 use x402_types::chain::{ChainId, ChainProviderOps};
 
@@ -133,12 +138,17 @@ impl<T: FulcrumTransport> FulcrumTransport for FailoverFulcrumTransport<T> {
 }
 
 /// A newline-delimited Electrum JSON-RPC connection.
+///
+/// Browsers cannot open this socket. Wasm builds use a caller-supplied
+/// transport instead of compiling TCP into the crate.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct FulcrumTcpTransport {
     stream: Arc<Mutex<TcpStream>>,
     next_id: Arc<AtomicU64>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FulcrumTcpTransport {
     pub async fn connect(address: &str) -> Result<Self, BchProviderError> {
         let stream = TcpStream::connect(address)
@@ -151,6 +161,7 @@ impl FulcrumTcpTransport {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl FulcrumTransport for FulcrumTcpTransport {
     async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError> {

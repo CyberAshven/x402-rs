@@ -13863,8 +13863,10 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bip39",
+ "getrandom 0.2.17",
  "hex",
  "hmac 0.12.1",
+ "js-sys",
  "ripemd",
  "secp256k1 0.31.1",
  "serde",
@@ -13872,6 +13874,8 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "x402-types",
 ]
 

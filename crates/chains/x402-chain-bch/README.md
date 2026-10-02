@@ -105,11 +105,18 @@ let transport = FailoverFulcrumTransport::new(vec![primary, secondary])?;
 let provider = FulcrumProvider::new(transport, BchChainReference::MAINNET);
 ```
 
-The bundled `FulcrumTcpTransport` is intentionally a plain TCP building block;
-applications requiring TLS or WSS should provide a transport implementation
-that performs certificate validation. Availability redundancy is not chain
-verification: applications should compare chain tip/header data across
-independent servers when making operational decisions.
+The bundled `FulcrumTcpTransport` is a native TCP building block and is not
+compiled for `wasm32-unknown-unknown`. Browser callers use `JsFulcrumTransport`
+and `BchBrowserClient` in `src/wasm.rs`, which call the same client,
+transaction, and verifier code. The browser function returns the JSON-RPC
+result as a string. Applications that need TLS or WSS on native should provide
+a transport that performs certificate validation. Availability redundancy is
+not chain verification: applications should compare chain tip/header data
+across independent servers when making operational decisions.
+
+See `examples/bch-browser` for a working page. Wasm builds need Clang.
+`.cargo/config.toml` allows the implicit `memmove` declaration in the bundled
+libsecp256k1 wasm sources.
 
 Endpoint availability and chain consistency are deployment concerns and should
 be revalidated by each operator. Do not disable certificate validation for a

@@ -21,13 +21,19 @@ pub mod v2_bch_exact;
 mod regression;
 
 pub use chain::{BCH_NAMESPACE, BchChainReference, BchChainReferenceFormatError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use provider::FulcrumTcpTransport;
 pub use provider::{
     BchChainProvider, BchOutpointStatus, BchProviderError, BchTransactionStatus, BchUtxo,
-    FailoverFulcrumTransport, FulcrumProvider, FulcrumTcpTransport, FulcrumTransport,
+    FailoverFulcrumTransport, FulcrumProvider, FulcrumTransport,
 };
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 pub use settlement::{BchSettlementClaim, BchSettlementStore, InMemoryBchSettlementStore};
 pub use transaction::{
     BCH_SIGHASH_ALL_FORKID, BchNft, BchPaymentTarget, BchPolicy, BchToken, BchTokenCapability,
     BchTransaction, OutPoint, SourceOutput, TxId,
 };
 pub use v2_bch_exact::{BchExtra, ExactBchPayload, V2BchExact, V2BchExactClient};
+#[cfg(target_arch = "wasm32")]
+pub use wasm::{BchBrowserClient, JsFulcrumTransport};
