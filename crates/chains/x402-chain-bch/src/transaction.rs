@@ -322,8 +322,11 @@ impl BchTransaction {
     }
 }
 
-/// Headroom above the 546-sat native dust floor. Every supported CashToken
-/// locking script has a standard relay dust of at most 828 sats.
+/// Default BCH value of a CashToken merchant output when the price omits
+/// `tokenOutputValue`. Every supported CashToken locking script has a standard
+/// relay dust of at most 828 sats, so 1,000 sats clears that floor. Native
+/// outputs keep the 546-sat dust threshold. An explicit value is preserved
+/// and still has to meet the size-based dust check.
 pub(crate) const CASHTOKEN_OUTPUT_DUST: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

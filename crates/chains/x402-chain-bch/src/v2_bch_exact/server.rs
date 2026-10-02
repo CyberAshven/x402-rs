@@ -44,6 +44,9 @@ impl V2BchExact {
         }
     }
 
+    /// Build a CashToken price. An omitted `token_output_value` advertises
+    /// 1,000 satoshis on the token output, or the policy dust threshold when
+    /// that threshold is higher.
     pub fn cash_token_price_tag(
         pay_to: impl Into<String>,
         category: impl Into<String>,

@@ -716,13 +716,7 @@ where
                 selected.push(utxo);
             }
         }
-        if !selection_funded(
-            &target,
-            &selected,
-            selected_value,
-            selected_token_amount,
-            self.policy,
-        )? {
+        if !inputs_cover_payment(&target, &selected, selected_value, selected_token_amount) {
             return Err(X402Error::SigningError(
                 "insufficient BCH/CashToken UTXOs for payment and fee".to_string(),
             ));
@@ -1006,6 +1000,18 @@ fn selected_nft_present(target: &BchPaymentTarget, selected: &[BchUtxo]) -> bool
                 .is_some_and(|token| token.nft.as_ref() == Some(expected))
         }),
     }
+}
+
+fn inputs_cover_payment(
+    target: &BchPaymentTarget,
+    selected: &[BchUtxo],
+    selected_value: u64,
+    selected_token_amount: u64,
+) -> bool {
+    !selected.is_empty()
+        && selected_token_covers(target, selected_token_amount)
+        && selected_nft_present(target, selected)
+        && selected_value >= target_merchant_value(target)
 }
 
 fn selection_funded(

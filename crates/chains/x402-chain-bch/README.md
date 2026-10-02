@@ -67,6 +67,13 @@ and optional NFT capability/commitment data. Fungible token amounts, NFT
 commitments/capabilities, BCH output values, and token change are validated as
 separate UTXO invariants.
 
+When a CashToken price omits `tokenOutputValue`, the merchant output value
+defaults to 1,000 satoshis, or to the policy dust threshold when that
+threshold is higher. 1,000 satoshis covers the standard relay dust of every
+CashToken locking script this crate can pay (at most 828). An explicit
+`tokenOutputValue` is preserved and must still pass the size-based dust
+check. Native BCH outputs keep the 546-satoshi dust floor.
+
 P2SH32 is a valid payment destination for compiled CashScript contracts. The
 facilitator verifies that the requested output pays the requested locking
 script, but it does not prove the contract's future successor transaction.

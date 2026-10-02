@@ -455,6 +455,36 @@ fn native_bch_one_input_payment() {
 }
 
 #[test]
+fn native_no_change_payment_uses_actual_fee_not_conservative_estimate() {
+    let selected = vec![utxo(1, 1_250, None)];
+    let requirements = native_requirements(NATIVE_PAY_TO, "1000");
+    let merchant = CashAddr::decode_script(NATIVE_PAY_TO, BchChainReference::Mainnet).unwrap();
+    let target = payment_target("BCH", "1000", "native", None, BchPolicy::default()).unwrap();
+    let transaction = build_and_sign_transaction(
+        &selected,
+        merchant.locking_script(),
+        target.clone(),
+        &signer(),
+        BchChainReference::Mainnet,
+        BchPolicy::default(),
+    )
+    .expect("the selected input can fund a no-change transaction");
+    assert_eq!(transaction.outputs.len(), 1);
+    assert!(transaction.serialize().len() <= 250);
+    verify_payment(
+        &transaction,
+        &[selected[0].source_output.clone()],
+        BchChainReference::Mainnet,
+        &merchant.locking_script(),
+        &target,
+        BchPolicy::default(),
+    )
+    .unwrap();
+    sign_with(FakeProvider::new(selected), &requirements)
+        .expect("the client must not reject a payment its builder and validator accept");
+}
+
+#[test]
 fn native_bch_multi_input_payment() {
     let provider = FakeProvider::new(vec![utxo(1, 2_000, None), utxo(2, 2_000, None)]);
     let requirements = native_requirements(NATIVE_PAY_TO, "3000");
