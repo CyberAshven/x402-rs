@@ -1,6 +1,6 @@
 //! Bitcoin Cash transaction parsing, serialization, and P2PKH validation.
 
-use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
+use secp256k1::{Message, PublicKey, Scalar, Secp256k1, SecretKey, ecdsa::Signature};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -305,8 +305,7 @@ impl BchTransaction {
         if u32::from(sighash_type) != BCH_SIGHASH_ALL_FORKID {
             return Err(TransactionError::UnsupportedSighash);
         }
-        let signature = Signature::from_der(&signature_bytes[..signature_bytes.len() - 1])
-            .map_err(|_| TransactionError::InvalidSignature)?;
+        let signature = &signature_bytes[..signature_bytes.len() - 1];
         let public_key_bytes = pushes[1];
         let public_key = PublicKey::from_slice(public_key_bytes)
             .map_err(|_| TransactionError::InvalidPublicKey)?;
@@ -315,10 +314,19 @@ impl BchTransaction {
             return Err(TransactionError::InvalidSignature);
         }
         let digest = self.signing_hash(input_index, source_output, BCH_SIGHASH_ALL_FORKID)?;
-        let message = Message::from_digest(digest);
-        Secp256k1::verification_only()
-            .verify_ecdsa(message, &signature, &public_key)
-            .map_err(|_| TransactionError::InvalidSignature)?;
+        // A 64-byte signature is BCH Schnorr; anything else must be DER ECDSA.
+        let valid = if signature.len() == 64 {
+            verify_bch_schnorr(signature, &public_key, &digest)
+        } else {
+            let signature =
+                Signature::from_der(signature).map_err(|_| TransactionError::InvalidSignature)?;
+            Secp256k1::verification_only()
+                .verify_ecdsa(Message::from_digest(digest), &signature, &public_key)
+                .is_ok()
+        };
+        if !valid {
+            return Err(TransactionError::InvalidSignature);
+        }
         Ok(public_key_hash)
     }
 
@@ -992,6 +1000,43 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     let mut result = [0u8; 32];
     result.copy_from_slice(&second);
     result
+}
+
+/// Check a BCH Schnorr signature (May 2019 upgrade) over `digest`.
+///
+/// With e = SHA256(r || compressed public key || digest) mod n and
+/// R = sG - eP, the signature is valid when R is a point, x(R) = r, and
+/// y(R) is a quadratic residue mod p.
+fn verify_bch_schnorr(signature: &[u8], public_key: &PublicKey, digest: &[u8; 32]) -> bool {
+    use alloy_primitives::{U256, uint};
+    const P: U256 = uint!(0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f_U256);
+    const N: U256 = uint!(0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141_U256);
+    let (r, s) = signature.split_at(32);
+    let Some(s) = <[u8; 32]>::try_from(s)
+        .ok()
+        .and_then(|s| SecretKey::from_byte_array(s).ok())
+    else {
+        return false;
+    };
+    let e = Sha256::new()
+        .chain_update(r)
+        .chain_update(public_key.serialize())
+        .chain_update(digest)
+        .finalize();
+    let e = U256::from_be_slice(&e).reduce_mod(N);
+    let Ok(e) = Scalar::from_be_bytes(e.to_be_bytes::<32>()) else {
+        return false;
+    };
+    let secp = Secp256k1::new();
+    let Ok(e_p) = public_key.mul_tweak(&secp, &e) else {
+        return false;
+    };
+    let Ok(point) = PublicKey::from_secret_key(&secp, &s).combine(&e_p.negate(&secp)) else {
+        return false;
+    };
+    let point = point.serialize_uncompressed();
+    let y = U256::from_be_slice(&point[33..]);
+    point[1..33] == *r && y.pow_mod(P >> 1, P) == U256::from(1)
 }
 
 /// Evaluate push-only unlocking bytecode into the stack it leaves.
@@ -1758,5 +1803,35 @@ mod tests {
         };
         let floored = omitted_token_output_value(&script, [0x11; 32], 1, None, raised).unwrap();
         assert_eq!(floored, 5_000);
+    }
+    /// P2PKH inputs signed with BCH Schnorr, as wallets such as Electron Cash
+    /// do. The vectors are signed with Libauth.
+    #[test]
+    fn verifies_bch_schnorr_p2pkh_signatures() {
+        let source = SourceOutput {
+            value: 100_000,
+            script_pubkey: hex::decode("76a9142bc6096176ef885673b6ccd4cae63b298c36e0c088ac")
+                .unwrap(),
+            token: None,
+        };
+        let merchant = p2pkh_script(&[0x11; 20]);
+        let target = payment_target("BCH", "1000", "native", None, BchPolicy::default()).unwrap();
+        let verify = |raw: &str| {
+            let transaction = BchTransaction::parse(&hex::decode(raw).unwrap()).unwrap();
+            verify_payment(
+                &transaction,
+                std::slice::from_ref(&source),
+                BchChainReference::Mainnet,
+                &merchant,
+                &target,
+                BchPolicy::default(),
+            )
+        };
+        let valid = "0200000001f6e0da94cf431a01b230c306a051402cf7ea53b49ed1ad22dfff5b58db2a486a000000006441c5d7260f6feb925a12f7121a0763a12b2c115c9b89157cc481fcbb6141155a025e5a95f30770d6541676488ede2ca9b4ac9cfb063cff20b5d141356921fa9610412102c1aa98aa906b0982db1bcd54e5093de08a6e63697d4ab9d47d68d2c34fdf52b6ffffffff02e8030000000000001976a914111111111111111111111111111111111111111188ace87a0100000000001976a9142bc6096176ef885673b6ccd4cae63b298c36e0c088ac00000000";
+        verify(valid).expect("Schnorr P2PKH signature");
+        assert!(verify("0200000001f2ce96d57deb4f4f677d7e5256f5a9c0ab5b93f16b3bf39dd6063090fc457296000000006441649c0e9ada9276d83267465d5fac08c2eb75721527d1f8208b8f651374f4c210b7f1178030221038ad63a3e4818b2a4da58229e5c539cda455d7c45de8e49e3b412102c1aa98aa906b0982db1bcd54e5093de08a6e63697d4ab9d47d68d2c34fdf52b6ffffffff02e8030000000000001976a914111111111111111111111111111111111111111188ace87a0100000000001976a9142bc6096176ef885673b6ccd4cae63b298c36e0c088ac00000000").is_err());
+        let mut flipped = hex::decode(valid).unwrap();
+        flipped[50] ^= 0x01;
+        assert!(verify(&hex::encode(flipped)).is_err());
     }
 }
