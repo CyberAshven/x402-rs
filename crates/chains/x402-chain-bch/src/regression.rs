@@ -8,8 +8,8 @@ use serde_json::json;
 use x402_types::chain::{ChainId, ChainProviderOps};
 use x402_types::proto::v2::{ExtensionsJson, ResourceInfo, X402Version2};
 use x402_types::proto::{OriginalJson, PaymentRequired};
-use x402_types::scheme::X402SchemeFacilitator;
 use x402_types::scheme::client::{X402Error, X402SchemeClient};
+use x402_types::scheme::{X402SchemeFacilitator, X402SchemeFacilitatorBuilder};
 use x402_types::util::Base64Bytes;
 
 use crate::BchChainReference;
@@ -2443,6 +2443,22 @@ fn node_check_runs_script_inputs_at_verify() {
         error.contains("BCH node rejected the transaction: mandatory-script-verify-flag-failed"),
         "{error}"
     );
+
+    // The x402 facilitator builds schemes from providers shared through `Arc`;
+    // the node check must still run.
+    let provider = FakeProvider::new(vec![contract.clone()]);
+    provider.set_mempool_test(Some(Err("mandatory-script-verify-flag-failed".to_string())));
+    let shared = crate::v2_bch_exact::V2BchExact
+        .build(Arc::new(provider.clone()), None)
+        .unwrap();
+    let error = block_on(shared.verify(&proto_request(&payload, &requirements)))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("BCH node rejected the transaction"),
+        "{error}"
+    );
+    assert_eq!(provider.mempool_tests(), 1);
 
     let provider = FakeProvider::new(vec![utxo(1, 100_000, None)]);
     provider.set_mempool_test(Some(Err("unused".to_string())));

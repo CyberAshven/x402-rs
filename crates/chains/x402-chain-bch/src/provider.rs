@@ -99,6 +99,49 @@ pub trait BchChainProvider: ChainProviderOps + Send + Sync {
     }
 }
 
+/// A shared provider, as the x402 facilitator keeps chain providers in `Arc`.
+#[async_trait]
+impl<T: BchChainProvider> BchChainProvider for Arc<T> {
+    async fn source_output(&self, outpoint: &OutPoint) -> Result<SourceOutput, BchProviderError> {
+        (**self).source_output(outpoint).await
+    }
+
+    async fn outpoint_status(
+        &self,
+        outpoint: &OutPoint,
+        source_output: &SourceOutput,
+    ) -> Result<BchOutpointStatus, BchProviderError> {
+        (**self).outpoint_status(outpoint, source_output).await
+    }
+
+    async fn list_utxos(&self, address: &CashAddr) -> Result<Vec<BchUtxo>, BchProviderError> {
+        (**self).list_utxos(address).await
+    }
+
+    async fn broadcast(&self, transaction: &[u8]) -> Result<TxId, BchProviderError> {
+        (**self).broadcast(transaction).await
+    }
+
+    async fn transaction_status(
+        &self,
+        txid: &TxId,
+    ) -> Result<BchTransactionStatus, BchProviderError> {
+        (**self).transaction_status(txid).await
+    }
+
+    async fn tip_height(&self) -> Result<u64, BchProviderError> {
+        (**self).tip_height().await
+    }
+
+    async fn has_double_spend_proof(&self, txid: &TxId) -> Result<bool, BchProviderError> {
+        (**self).has_double_spend_proof(txid).await
+    }
+
+    async fn test_mempool_accept(&self, transaction: &[u8]) -> Option<Result<(), String>> {
+        (**self).test_mempool_accept(transaction).await
+    }
+}
+
 /// Minimal JSON-RPC transport contract for Fulcrum-compatible servers.
 #[async_trait]
 pub trait FulcrumTransport: Clone + Send + Sync + 'static {
