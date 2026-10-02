@@ -40,9 +40,31 @@ integer satoshis.
 
 The crate test suite includes `test/fixtures/bch-exact-p2pkh.json`, a
 deterministic native-BCH P2PKH payment fixture shared with the TypeScript
-`@x402/bch` implementation. It covers the serialized transaction, source
-output, merchant amount, payer, transaction ID, and fee so integrations can
-compare results across both SDKs.
+package [`@optnlabs/x402-bch`](https://www.npmjs.com/package/@optnlabs/x402-bch).
+It covers the serialized transaction, source output, merchant amount, payer,
+transaction ID, and fee so integrations can compare results across both SDKs.
+
+## Related packages and pull requests
+
+This crate is the Rust implementation of the same BCH exact payment rules as
+`@optnlabs/x402-bch`. It is not published on crates.io yet. Until the upstream
+pull request merges, Rust callers can depend on the open branch:
+
+```toml
+x402-chain-bch = { git = "https://github.com/CyberAshven/x402-rs", branch = "feat/bch-x402-rs-integration" }
+```
+
+- npm package: https://www.npmjs.com/package/@optnlabs/x402-bch
+- TypeScript pull request: https://github.com/OPTNLabs/x402-bch/pull/1
+- Rust pull request: https://github.com/lightswarm124/x402-rs/pull/1
+- Upstream BCH pull request: https://github.com/x402-rs/x402-rs/pull/129
+- Closed earlier upstream request: https://github.com/x402-rs/x402-rs/pull/128
+
+Chipnet payments from these branches:
+
+- setup transaction: https://chipnet.chaingraph.cash/tx/210f4659913fa77500ce547d7103f2e163bc39b1ecb287dfb7b0748fdb8627a3
+- TypeScript exact NFT payment: https://chipnet.chaingraph.cash/tx/7c46af9c142e092a82f1cfafe87212bbd9d4b15b9b6a52f10e6bf1b28331baef
+- Rust exact native payment: https://chipnet.chaingraph.cash/tx/57b434f19d901960802ef93f601358ed7d5996b73f94e6f689c2be8b18943c09
 
 ## Transaction lifecycle
 
