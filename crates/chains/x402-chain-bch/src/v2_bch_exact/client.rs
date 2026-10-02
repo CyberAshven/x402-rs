@@ -24,7 +24,7 @@ use crate::transaction::{
 use crate::transaction::{BchNft, TransactionError};
 use crate::v2_bch_exact::V2BchExact;
 use crate::v2_bch_exact::types::{
-    BchExtra, BchNftRequest, BchTokenRequest, BchTransactionRequest, ExactBchPayload,
+    BchExtra, BchNftRequest, BchRecipient, BchTokenRequest, BchTransactionRequest, ExactBchPayload,
     PaymentPayload, PaymentRequirements,
 };
 
@@ -208,6 +208,7 @@ pub async fn discover_bch_hd_wallet_addresses<P: BchChainProvider + Sync>(
 
 fn transaction_request(
     requirements: &PaymentRequirements,
+    merchant_value: u64,
 ) -> Result<BchTransactionRequest, X402Error> {
     let network = crate::BchChainReference::try_from(requirements.network.clone())
         .map_err(|error| X402Error::SigningError(error.to_string()))?;
@@ -240,9 +241,10 @@ fn transaction_request(
         } else {
             crate::v2_bch_exact::types::BchTransactionNetwork::Mainnet
         },
-        recipient: requirements.pay_to.clone(),
-        amount: requirements.amount.clone(),
-        token_output_value: requirements.extra.token_output_value.clone(),
+        recipient: BchRecipient {
+            address: requirements.pay_to.clone(),
+        },
+        value: merchant_value.to_string(),
         token,
     })
 }
@@ -539,7 +541,6 @@ where
     P: BchChainProvider + Sync + 'static,
 {
     async fn sign_payment(&self) -> Result<String, X402Error> {
-        let mut request = transaction_request(&self.requirements)?;
         let network = crate::BchChainReference::try_from(self.requirements.network.clone())
             .map_err(|error| X402Error::SigningError(error.to_string()))?;
         let merchant = CashAddr::decode_script(&self.requirements.pay_to, network)
@@ -561,9 +562,7 @@ where
             self.policy,
         )
         .map_err(|error| X402Error::SigningError(error.to_string()))?;
-        if request.token.is_some() && request.token_output_value.is_none() {
-            request.token_output_value = Some(target_merchant_value(&target).to_string());
-        }
+        let request = transaction_request(&self.requirements, target_merchant_value(&target))?;
         let raw = self
             .wallet
             .create_payment(request)

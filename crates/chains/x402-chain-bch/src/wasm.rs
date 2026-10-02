@@ -137,7 +137,7 @@ impl BchBrowserClient {
     ///
     /// `requirements_json` is one x402 v2 `PaymentRequirements` object.
     /// `resource_url` is bound into the signed payload. An omitted CashToken
-    /// `tokenOutputValue` uses the size-aware default inside that client.
+    /// `value` uses the size-aware default inside that client.
     pub async fn sign_exact(
         &self,
         requirements_json: &str,
@@ -160,9 +160,11 @@ impl BchBrowserClient {
 
 /// Browser binding for [`V2BchExactWalletClient`].
 ///
-/// `create_payment` is `async (requestJson) => transactionHex`. The callback
-/// returns a signed transaction. Parsing, source-output lookup, and
-/// `verify_payment` stay in the Rust wallet client.
+/// `create_payment` is `async (requestJson) => transactionHex`. `requestJson`
+/// has the shape of `BchTransactionRequest` in `@optnlabs/x402-bch`, with
+/// amounts as decimal strings. The callback returns a signed transaction.
+/// Parsing, source-output lookup, and `verify_payment` stay in the Rust wallet
+/// client.
 #[wasm_bindgen]
 pub struct BchBrowserWalletClient {
     client: V2BchExactWalletClient<JsWallet, FulcrumProvider<JsFulcrumTransport>>,
@@ -227,13 +229,10 @@ pub fn build_signed_payment(
         .map(WalletUtxoJson::into_utxo)
         .collect::<Result<Vec<_>, String>>()
         .map_err(|error| JsValue::from_str(&error))?;
-    let merchant = CashAddr::decode_script(&request.recipient, network)
+    let merchant = CashAddr::decode_script(&request.recipient.address, network)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let merchant_script = merchant.locking_script();
     let target = if let Some(token) = &request.token {
-        let quoted = request.token_output_value.as_deref().ok_or_else(|| {
-            JsValue::from_str("CashToken wallet request is missing tokenOutputValue")
-        })?;
         let nft = parse_cash_token_nft(
             token.nft.as_ref().map(|nft| nft.capability.as_str()),
             token.nft.as_ref().map(|nft| nft.commitment.as_str()),
@@ -243,14 +242,14 @@ pub fn build_signed_payment(
             &token.category,
             &token.amount,
             "cashtoken",
-            Some(quoted),
+            Some(&request.value),
             nft,
             &merchant_script,
             BchPolicy::default(),
         )
         .map_err(|error| JsValue::from_str(&error.to_string()))?
     } else {
-        payment_target("BCH", &request.amount, "native", None, BchPolicy::default())
+        payment_target("BCH", &request.value, "native", None, BchPolicy::default())
             .map_err(|error| JsValue::from_str(&error.to_string()))?
     };
     let transaction = build_and_sign_transaction(

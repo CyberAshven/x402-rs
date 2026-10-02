@@ -70,7 +70,8 @@ x402-chain-bch = { git = "https://github.com/CyberAshven/x402-rs", branch = "fea
 
 CashToken merchant satoshis are `extra.value` in this crate and in
 `@optnlabs/x402-bch`. This crate still accepts `tokenOutputValue` when reading
-an older message. The wallet request keeps its own `tokenOutputValue` field.
+an older message. The wallet request has the same shape as in `@optnlabs/x402-bch`:
+`recipient.address`, the merchant satoshis in `value`, and an optional `token`.
 
 - npm package: https://www.npmjs.com/package/@optnlabs/x402-bch
 - TypeScript pull request: https://github.com/OPTNLabs/x402-bch/pull/1

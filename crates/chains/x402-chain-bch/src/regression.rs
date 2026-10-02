@@ -32,8 +32,9 @@ use crate::v2_bch_exact::facilitator::{
     BchConfirmationStrategy, BchFacilitatorConfig, V2BchExactFacilitator,
 };
 use crate::v2_bch_exact::types::{
-    BchExtra, BchNftRequest, BchTokenRequest, BchTransactionNetwork, BchTransactionRequest,
-    ExactBchPayload, ExactScheme, PaymentPayload, PaymentRequirements, VerifyRequest,
+    BchExtra, BchNftRequest, BchRecipient, BchTokenRequest, BchTransactionNetwork,
+    BchTransactionRequest, ExactBchPayload, ExactScheme, PaymentPayload, PaymentRequirements,
+    VerifyRequest,
 };
 
 const MNEMONIC: &str =
@@ -362,14 +363,10 @@ impl BchWallet for RecordingWallet {
             BchTransactionNetwork::Mainnet => BchChainReference::Mainnet,
             BchTransactionNetwork::Chipnet => BchChainReference::Chipnet,
         };
-        let merchant = CashAddr::decode_script(&request.recipient, network)
+        let merchant = CashAddr::decode_script(&request.recipient.address, network)
             .map_err(|error| error.to_string())?;
         let merchant_script = merchant.locking_script();
         let target = if let Some(token) = &request.token {
-            let quoted = request
-                .token_output_value
-                .as_deref()
-                .ok_or("CashToken wallet request is missing tokenOutputValue")?;
             let nft = crate::transaction::parse_cash_token_nft(
                 token.nft.as_ref().map(|nft| nft.capability.as_str()),
                 token.nft.as_ref().map(|nft| nft.commitment.as_str()),
@@ -379,14 +376,14 @@ impl BchWallet for RecordingWallet {
                 &token.category,
                 &token.amount,
                 "cashtoken",
-                Some(quoted),
+                Some(&request.value),
                 nft,
                 &merchant_script,
                 BchPolicy::default(),
             )
             .map_err(|error| error.to_string())?
         } else {
-            payment_target("BCH", &request.amount, "native", None, BchPolicy::default())
+            payment_target("BCH", &request.value, "native", None, BchPolicy::default())
                 .map_err(|error| error.to_string())?
         };
         let transaction = build_and_sign_transaction(
@@ -546,16 +543,28 @@ fn cashtoken_extra_uses_value_and_accepts_token_output_value() {
     .unwrap();
     assert_eq!(from_alias.token_output_value.as_deref(), Some("1000"));
 
+    // The wallet request has the shape of BchTransactionRequest in @optnlabs/x402-bch.
     let wallet = BchTransactionRequest {
         network: BchTransactionNetwork::Chipnet,
-        recipient: "bchtest:qqpg03w6u3rqnrv9xw3fhxxx58c42tzw45vzz3vz9f".to_string(),
-        amount: "1".to_string(),
-        token_output_value: Some("1000".to_string()),
-        token: None,
+        recipient: BchRecipient {
+            address: "bchtest:zqpg03w6u3rqnrv9xw3fhxxx58c42tzw45tg30zy66".to_string(),
+        },
+        value: "1000".to_string(),
+        token: Some(BchTokenRequest {
+            category: category_hex(),
+            amount: "1".to_string(),
+            nft: None,
+        }),
     };
-    let wallet_json = serde_json::to_value(&wallet).unwrap();
-    assert_eq!(wallet_json["tokenOutputValue"], "1000");
-    assert!(wallet_json.get("value").is_none());
+    assert_eq!(
+        serde_json::to_value(&wallet).unwrap(),
+        json!({
+            "network": "chipnet",
+            "recipient": { "address": "bchtest:zqpg03w6u3rqnrv9xw3fhxxx58c42tzw45tg30zy66" },
+            "value": "1000",
+            "token": { "category": category_hex(), "amount": "1" }
+        })
+    );
 }
 
 #[test]
@@ -1568,10 +1577,7 @@ fn offline_nft_commitments_pay_every_supported_destination() {
                         hex::encode(wallet_tx.serialize()),
                         hex::encode(transaction.serialize())
                     );
-                    assert_eq!(
-                        request.unwrap().token_output_value.as_deref(),
-                        Some(advertised.as_str())
-                    );
+                    assert_eq!(request.unwrap().value, advertised);
                     browser_cases.push(browser_case(
                         &format!("wallet-{shape}-{destination}-{length}"),
                         "wallet",
