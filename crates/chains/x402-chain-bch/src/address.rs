@@ -78,7 +78,12 @@ impl CashAddr {
         value: &str,
         expected_network: BchChainReference,
     ) -> Result<CashAddrScript, CashAddrError> {
-        CashAddrScript::decode(value, expected_network)
+        match CashAddrScript::decode(value, expected_network) {
+            Err(error) if !value.contains(':') => {
+                decode_legacy(value, expected_network).ok_or(error)
+            }
+            decoded => decoded,
+        }
     }
 
     pub fn encode(self) -> String {
@@ -309,6 +314,49 @@ fn convert_bits(data: &[u8], from: u8, to: u8, pad: bool) -> Option<Vec<u8>> {
     Some(result)
 }
 
+/// Legacy Base58Check P2PKH and P2SH20 addresses, which `@optnlabs/x402-bch`
+/// also accepts for a merchant. Versions 28 and 40 are the BitPay forms.
+fn decode_legacy(value: &str, network: BchChainReference) -> Option<CashAddrScript> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut bytes = [0u8; 25];
+    for character in value.bytes() {
+        let mut carry = ALPHABET.iter().position(|a| *a == character)? as u32;
+        for byte in bytes.iter_mut().rev() {
+            carry += u32::from(*byte) * 58;
+            *byte = carry as u8;
+            carry >>= 8;
+        }
+        if carry != 0 {
+            return None;
+        }
+    }
+    let leading_ones = value.bytes().take_while(|c| *c == b'1').count();
+    if bytes.iter().take_while(|b| **b == 0).count() != leading_ones {
+        return None;
+    }
+    let (payload, checksum) = bytes.split_at(21);
+    let digest = Sha256::digest(Sha256::digest(payload));
+    if digest[..4] != *checksum {
+        return None;
+    }
+    let (kind, mainnet) = match payload[0] {
+        0 | 28 => (CashAddrType::P2pkh, true),
+        5 | 40 => (CashAddrType::P2sh20, true),
+        111 => (CashAddrType::P2pkh, false),
+        196 => (CashAddrType::P2sh20, false),
+        _ => return None,
+    };
+    if mainnet != (network == BchChainReference::Mainnet) {
+        return None;
+    }
+    Some(CashAddrScript {
+        network,
+        kind,
+        payload: payload[1..].to_vec(),
+        token_support: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +430,75 @@ mod tests {
             CashAddrScript::decode(&encoded, BchChainReference::Chipnet).unwrap(),
             token_p2sh20
         );
+    }
+    /// Legacy addresses decode to the same script as their CashAddr form.
+    /// The vectors are encoded with Libauth.
+    #[test]
+    fn decodes_legacy_base58_addresses() {
+        for (legacy, cashaddr, network) in [
+            (
+                "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu",
+                "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC",
+                "bitcoincash:ppm2qsznhks23z7629mms6s4cwef74vcwvn0h829pq",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "CTH8H8Zj6DSnXFBKQeDG28ogAS92iS16Bp",
+                "bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "HHLN6S9BcP1JLSrMhgD5qe57iVEMFMLCBT",
+                "bitcoincash:ppm2qsznhks23z7629mms6s4cwef74vcwvn0h829pq",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "mrLC19Je2BuWQDkWSTriGYPyQJXKkkBmCx",
+                "bchtest:qpm2qsznhks23z7629mms6s4cwef74vcwvqcw003ap",
+                BchChainReference::Chipnet,
+            ),
+            (
+                "2N44ThNe8NXHyv4bsX8AoVCXquBRW94Ls7W",
+                "bchtest:ppm2qsznhks23z7629mms6s4cwef74vcwvhanqgjxu",
+                BchChainReference::Chipnet,
+            ),
+        ] {
+            let decoded = CashAddr::decode_script(legacy, network).unwrap();
+            let expected = CashAddr::decode_script(cashaddr, network).unwrap();
+            assert_eq!(
+                decoded.locking_script(),
+                expected.locking_script(),
+                "{legacy}"
+            );
+            assert!(!decoded.token_support);
+        }
+        for (bad, network) in [
+            (
+                "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggv",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu",
+                BchChainReference::Chipnet,
+            ),
+            (
+                "mrLC19Je2BuWQDkWSTriGYPyQJXKkkBmCx",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "11BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu",
+                BchChainReference::Mainnet,
+            ),
+            (
+                "0BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu",
+                BchChainReference::Mainnet,
+            ),
+        ] {
+            assert!(CashAddr::decode_script(bad, network).is_err(), "{bad}");
+        }
     }
 }

@@ -26,6 +26,9 @@ finalized raw transaction. The facilitator must not append inputs or mutate a
 signed transaction. BCH amounts are satoshis; token amounts are atomic units.
 Both are conserved independently.
 
+`payTo` may be a CashAddr or, for a native BCH payment, a legacy Base58Check
+P2PKH or P2SH20 address. P2PKH inputs may be signed with ECDSA or BCH Schnorr.
+
 The facilitator requires exactly one output that matches the merchant script,
 value, and token state, and no second output to the merchant script. A wallet
 may add other outputs up to `BchPolicy::max_outputs` (16 by default), including
