@@ -229,11 +229,16 @@ where
             ));
         }
 
-        let status = self
+        let status = match self
             .provider
             .transaction_status(&txid)
             .await
-            .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?;
+            .map_err(|error| X402SchemeFacilitatorError::OnchainFailure(error.to_string()))?
+        {
+            // The node accepted the broadcast; Fulcrum indexes its mempool a moment later.
+            BchTransactionStatus::NotFound => BchTransactionStatus::Mempool,
+            status => status,
+        };
         if self.settlement_accepted(&txid, status).await? {
             self.settlement_store.mark_accepted(&txid.to_string()).await;
             return Ok(v2::SettleResponse::Success {

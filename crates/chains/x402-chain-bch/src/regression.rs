@@ -1196,6 +1196,24 @@ fn accepts_mempool_strategy() {
 }
 
 #[test]
+fn accepts_a_broadcast_before_the_provider_indexes_it() {
+    // Right after relaying a broadcast, Fulcrum can still answer "not found".
+    let provider = FakeProvider::new(vec![utxo(1, 100_000, None)]);
+    provider.set_status(BchTransactionStatus::NotFound);
+    let requirements = native_requirements(NATIVE_PAY_TO, "3000");
+    let payload = sign_with(provider.clone(), &requirements).unwrap();
+    let request = proto_request(&payload, &requirements);
+    let mempool =
+        block_on(facilitator(provider.clone(), BchConfirmationStrategy::Mempool).settle(&request))
+            .unwrap();
+    assert_eq!(mempool.0["success"], true);
+    let confirmations =
+        block_on(facilitator(provider, BchConfirmationStrategy::Confirmations(1)).settle(&request))
+            .unwrap();
+    assert_eq!(confirmations.0["success"], false);
+}
+
+#[test]
 fn double_spend_proof_strategy_rejects_mempool_with_proof() {
     let provider = FakeProvider::new(vec![utxo(1, 100_000, None)]);
     provider.set_status(BchTransactionStatus::Mempool);
