@@ -42,6 +42,13 @@ broadcasts the transaction, and settlement fails if one is invalid. The
 TypeScript package runs them in the Libauth VM before broadcast. Both accept
 the same valid payments.
 
+To run those scripts during verification instead, give the provider a BCH
+node: `FulcrumProvider::new(transport, network).with_node(node)`, where `node`
+implements `BchNodeRpc` with one JSON-RPC call, for example over HTTP to the
+Bitcoin Cash Node behind a Fulcrum server. Payments with non-P2PKH inputs then
+go through the node's `testmempoolaccept` before verification succeeds. If the
+node does not answer, the scripts are left to the network as before.
+
 The wallet-facing request uses `mainnet` or `chipnet`. The x402 wire network
 identities remain `bch:bitcoincash` and `bch:bchtest`.
 

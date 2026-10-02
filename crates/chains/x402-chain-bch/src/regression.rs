@@ -112,6 +112,8 @@ struct FakeState {
     dsp: Mutex<bool>,
     broadcast_error: Mutex<Option<String>>,
     broadcasts: AtomicUsize,
+    mempool_test: Mutex<Option<Result<(), String>>>,
+    mempool_tests: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -136,6 +138,8 @@ impl FakeProvider {
                 dsp: Mutex::new(false),
                 broadcast_error: Mutex::new(None),
                 broadcasts: AtomicUsize::new(0),
+                mempool_test: Mutex::new(None),
+                mempool_tests: AtomicUsize::new(0),
             }),
         }
     }
@@ -166,6 +170,14 @@ impl FakeProvider {
 
     fn broadcasts(&self) -> usize {
         self.state.broadcasts.load(Ordering::SeqCst)
+    }
+
+    fn set_mempool_test(&self, answer: Option<Result<(), String>>) {
+        *self.state.mempool_test.lock().unwrap() = answer;
+    }
+
+    fn mempool_tests(&self) -> usize {
+        self.state.mempool_tests.load(Ordering::SeqCst)
     }
 }
 
@@ -223,6 +235,11 @@ impl BchChainProvider for FakeProvider {
 
     async fn tip_height(&self) -> Result<u64, BchProviderError> {
         Ok(*self.state.tip.lock().unwrap())
+    }
+
+    async fn test_mempool_accept(&self, _transaction: &[u8]) -> Option<Result<(), String>> {
+        self.state.mempool_tests.fetch_add(1, Ordering::SeqCst);
+        self.state.mempool_test.lock().unwrap().clone()
     }
 
     async fn has_double_spend_proof(&self, _txid: &TxId) -> Result<bool, BchProviderError> {
@@ -2363,4 +2380,77 @@ fn wallet_shapes_follow_the_typescript_rules() {
         "wallet shape vectors changed; regenerate test/fixtures/bch-exact-wallet-shape-vectors.json \
          with BCH_WALLET_SHAPE_VECTORS and update the TypeScript copy"
     );
+}
+
+/// A configured node runs the scripts of non-P2PKH inputs at verify. Without
+/// one, verification passes and the network runs them at broadcast. P2PKH-only
+/// payments are fully checked here and never ask the node.
+#[test]
+fn node_check_runs_script_inputs_at_verify() {
+    let redeem = [push_data(&signer().public_key()).unwrap(), vec![0xac]].concat();
+    let contract = owned_utxo(1, 100_000, p2sh20_script(&hash160(&redeem)), None);
+    let requirements = native_requirements(NATIVE_PAY_TO, "1000");
+    let merchant = CashAddr::decode_script(NATIVE_PAY_TO, BchChainReference::Mainnet)
+        .unwrap()
+        .locking_script();
+    let mut transaction = wallet_transaction(
+        std::slice::from_ref(&contract),
+        &[&signer()],
+        vec![
+            output(1_000, merchant, None),
+            output(97_000, payer_script(), None),
+        ],
+    );
+    let covered = SourceOutput {
+        script_pubkey: redeem.clone(),
+        ..contract.source_output.clone()
+    };
+    let digest = transaction
+        .signing_hash(0, &covered, crate::transaction::BCH_SIGHASH_ALL_FORKID)
+        .unwrap();
+    let mut signature = signer().sign_digest(digest).unwrap();
+    signature.push(crate::transaction::BCH_SIGHASH_ALL_FORKID as u8);
+    transaction.inputs[0].script_sig =
+        [push_data(&signature).unwrap(), push_data(&redeem).unwrap()].concat();
+    let payload = PaymentPayload {
+        accepted: requirements.clone(),
+        payload: ExactBchPayload {
+            transaction: Base64Bytes::encode(transaction.serialize()).to_string(),
+        },
+        resource: None,
+        x402_version: X402Version2,
+        extensions: ExtensionsJson::default(),
+    };
+    let verify = |answer: Option<Result<(), String>>| {
+        let provider = FakeProvider::new(vec![contract.clone()]);
+        provider.set_mempool_test(answer);
+        let verdict = block_on(
+            facilitator(provider.clone(), BchConfirmationStrategy::Mempool)
+                .verify(&proto_request(&payload, &requirements)),
+        );
+        (verdict, provider.mempool_tests())
+    };
+
+    let (verdict, asked) = verify(None);
+    assert!(verdict.is_ok(), "{verdict:?}");
+    assert_eq!(asked, 1);
+    assert!(verify(Some(Ok(()))).0.is_ok());
+    let error = verify(Some(Err("mandatory-script-verify-flag-failed".to_string())))
+        .0
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("BCH node rejected the transaction: mandatory-script-verify-flag-failed"),
+        "{error}"
+    );
+
+    let provider = FakeProvider::new(vec![utxo(1, 100_000, None)]);
+    provider.set_mempool_test(Some(Err("unused".to_string())));
+    let payload = sign_with(provider.clone(), &requirements).unwrap();
+    let verdict = block_on(
+        facilitator(provider.clone(), BchConfirmationStrategy::Mempool)
+            .verify(&proto_request(&payload, &requirements)),
+    );
+    assert!(verdict.is_ok(), "{verdict:?}");
+    assert_eq!(provider.mempool_tests(), 0);
 }

@@ -16,7 +16,7 @@ use crate::provider::{
 };
 use crate::settlement::{BchSettlementClaim, BchSettlementStore, InMemoryBchSettlementStore};
 use crate::transaction::{
-    BchNft, BchPolicy, BchTransaction, VerifiedPayment, parse_cash_token_nft,
+    BchNft, BchPolicy, BchTransaction, VerifiedPayment, is_p2pkh_script, parse_cash_token_nft,
     payment_target_with_nft, verify_payment,
 };
 use crate::v2_bch_exact::V2BchExact;
@@ -459,6 +459,18 @@ where
         policy,
     )
     .map_err(|error| proto::PaymentVerificationError::TransactionSimulation(error.to_string()))?;
+    // There is no script VM here. A configured node runs the scripts of
+    // non-P2PKH inputs now; otherwise the network runs them at broadcast.
+    if require_unspent
+        && source_outputs
+            .iter()
+            .any(|source| !is_p2pkh_script(&source.script_pubkey))
+        && let Some(Err(reason)) = provider.test_mempool_accept(&raw_transaction).await
+    {
+        return Err(proto::PaymentVerificationError::TransactionSimulation(
+            format!("BCH node rejected the transaction: {reason}"),
+        ));
+    }
     Ok(VerifiedBchPayment {
         transaction,
         payment,

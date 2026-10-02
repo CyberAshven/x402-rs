@@ -8,7 +8,6 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,11 +90,26 @@ pub trait BchChainProvider: ChainProviderOps + Send + Sync {
     /// transaction. The provider must document whether it validates the proof
     /// cryptographically or merely reports node/indexer state.
     async fn has_double_spend_proof(&self, txid: &TxId) -> Result<bool, BchProviderError>;
+
+    /// Asks a node whether it would accept `transaction` into its mempool,
+    /// scripts included, without broadcasting it. `None` means no node
+    /// answered, and the network judges the scripts at broadcast instead.
+    async fn test_mempool_accept(&self, _transaction: &[u8]) -> Option<Result<(), String>> {
+        None
+    }
 }
 
 /// Minimal JSON-RPC transport contract for Fulcrum-compatible servers.
 #[async_trait]
 pub trait FulcrumTransport: Clone + Send + Sync + 'static {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError>;
+}
+
+/// JSON-RPC access to a BCH node such as Bitcoin Cash Node. `request` returns
+/// the call's `result`. [`FulcrumProvider::with_node`] uses it for
+/// `testmempoolaccept`.
+#[async_trait]
+pub trait BchNodeRpc: Send + Sync {
     async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError>;
 }
 
@@ -233,11 +247,25 @@ impl FulcrumTransport for FulcrumTcpTransport {
 pub struct FulcrumProvider<T> {
     transport: T,
     network: BchChainReference,
+    node: Option<Arc<dyn BchNodeRpc>>,
 }
 
 impl<T> FulcrumProvider<T> {
     pub fn new(transport: T, network: BchChainReference) -> Self {
-        Self { transport, network }
+        Self {
+            transport,
+            network,
+            node: None,
+        }
+    }
+
+    /// Run the scripts of non-P2PKH inputs on `node` during verification,
+    /// through `testmempoolaccept`, instead of leaving them to the network at
+    /// broadcast. Verification falls back to the network if the node does not
+    /// answer.
+    pub fn with_node(mut self, node: impl BchNodeRpc + 'static) -> Self {
+        self.node = Some(Arc::new(node));
+        self
     }
 
     pub fn network(&self) -> BchChainReference {
@@ -444,6 +472,24 @@ impl<T: FulcrumTransport> BchChainProvider for FulcrumProvider<T> {
             .get("height")
             .and_then(Value::as_u64)
             .ok_or_else(|| BchProviderError::InvalidResponse("invalid chain tip".to_string()))
+    }
+
+    async fn test_mempool_accept(&self, transaction: &[u8]) -> Option<Result<(), String>> {
+        let result = self
+            .node
+            .as_ref()?
+            .request("testmempoolaccept", json!([[hex::encode(transaction)]]))
+            .await
+            .ok()?;
+        let entry = result.get(0)?;
+        if entry.get("allowed").and_then(Value::as_bool)? {
+            return Some(Ok(()));
+        }
+        let reason = entry
+            .get("reject-reason")
+            .and_then(Value::as_str)
+            .unwrap_or("rejected");
+        Some(Err(reason.to_string()))
     }
 
     async fn has_double_spend_proof(&self, txid: &TxId) -> Result<bool, BchProviderError> {
@@ -673,6 +719,56 @@ fn is_missing_transaction(error: &BchProviderError) -> bool {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    struct FixedNode(Result<Value, BchProviderError>);
+
+    #[async_trait]
+    impl BchNodeRpc for FixedNode {
+        async fn request(&self, method: &str, params: Value) -> Result<Value, BchProviderError> {
+            assert_eq!(method, "testmempoolaccept");
+            assert!(params[0][0].is_string());
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn node_answers_test_mempool_accept() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let answer = |node: Option<FixedNode>| {
+            let transport = TestTransport {
+                fail: false,
+                calls: Arc::new(Mutex::new(Vec::new())),
+            };
+            let provider = FulcrumProvider::new(transport, BchChainReference::CHIPNET);
+            let provider = match node {
+                Some(node) => provider.with_node(node),
+                None => provider,
+            };
+            runtime.block_on(provider.test_mempool_accept(&[0x02, 0x00]))
+        };
+        assert_eq!(answer(None), None);
+        assert_eq!(
+            answer(Some(FixedNode(Ok(json!([{ "allowed": true }]))))),
+            Some(Ok(()))
+        );
+        assert_eq!(
+            answer(Some(FixedNode(Ok(json!([{
+                "allowed": false,
+                "reject-reason": "mandatory-script-verify-flag-failed"
+            }]))))),
+            Some(Err("mandatory-script-verify-flag-failed".to_string()))
+        );
+        assert_eq!(
+            answer(Some(FixedNode(Err(BchProviderError::Transport(
+                "offline".to_string()
+            ))))),
+            None
+        );
+        assert_eq!(answer(Some(FixedNode(Ok(json!({ "busy": true }))))), None);
+    }
 
     #[derive(Clone)]
     struct RemoteErrorTransport(BchProviderError);
